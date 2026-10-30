@@ -1,0 +1,47 @@
+{
+  "_notes": [
+    "Two clients. Replace kite.example.in with your KITE_HOSTNAME in your own copy, never in this file.",
+    "The CF Access service-token values are NOT written here: both blocks read them from the environment (CF_ACCESS_CLIENT_ID, CF_ACCESS_CLIENT_SECRET). See deploy/README.md.",
+    "Claude Code is the supported client for orders: it connects to /mcp directly with the two headers, and its permissions.ask rules make every order call ask first.",
+    "Claude Code permissions (.claude/settings.json): {\"permissions\": {\"ask\": [\"mcp__kite__place_order\", \"mcp__kite__cancel_order\", \"mcp__kite__modify_order\"]}}. Never put an order tool under allow.",
+    "modify_order is excluded on the server (EXCLUDED_TOOLS), so it does not appear; the ask rule stays in case it is ever re-enabled.",
+    "Claude Desktop through mcp-remote: READ-ONLY use (login, get_profile, get_margins, get_positions, get_orders) until you have checked that place_order and cancel_order show an approval card on every call. Claude's docs describe per-tool 'Needs approval' for connectors, not for local servers in claude_desktop_config.json. Never click 'Always allow' on an order tool.",
+    "Write CF-Access-Client-Id:${...} with no space after the colon: Claude Desktop on Windows does not escape spaces inside args."
+  ],
+
+  "claude_code (.mcp.json in your trading folder, gitignored; or: claude mcp add-json kite '<the kite object>')": {
+    "mcpServers": {
+      "kite": {
+        "type": "http",
+        "url": "https://kite.example.in/mcp",
+        "headers": {
+          "CF-Access-Client-Id": "${CF_ACCESS_CLIENT_ID}",
+          "CF-Access-Client-Secret": "${CF_ACCESS_CLIENT_SECRET}"
+        }
+      }
+    }
+  },
+
+  "claude_desktop (claude_desktop_config.json, read-only until approval cards are verified)": {
+    "mcpServers": {
+      "kite": {
+        "command": "npx",
+        "args": [
+          "-y",
+          "mcp-remote@0.1.38",
+          "https://kite.example.in/mcp",
+          "--transport",
+          "http-only",
+          "--header",
+          "CF-Access-Client-Id:${CF_ACCESS_CLIENT_ID}",
+          "--header",
+          "CF-Access-Client-Secret:${CF_ACCESS_CLIENT_SECRET}"
+        ],
+        "env": {
+          "CF_ACCESS_CLIENT_ID": "type it here, in your local copy only",
+          "CF_ACCESS_CLIENT_SECRET": "type it here, in your local copy only"
+        }
+      }
+    }
+  }
+}

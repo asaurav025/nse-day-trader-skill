@@ -1,0 +1,29 @@
+{
+  "created_by": "trader-exit",
+  "symbol": "RELIANCE",
+  "side": "buy",
+  "date": "2026-10-29",
+  "setup": "orb",
+  "entry": 1174.3,
+  "entry_time": "9:40 AM",
+  "entry_bar": 4,
+  "interval": "5m",
+  "opening_range": {
+    "high": 1170.5,
+    "low": 1156.2,
+    "minutes": 15
+  },
+  "stop": 1163.3,
+  "stop_rule": "or_mid",
+  "stop_label": "opening-range midpoint",
+  "target": 1196.3,
+  "target_r": 2.0,
+  "target_label": "2R (two times the risk)",
+  "risk_per_share": 11.0,
+  "reward_risk": 2.0,
+  "flat_by": "15:10",
+  "stop_detail": "(₹1,170.50 + ₹1,156.20) / 2 = ₹1,163.35, down to the ₹0.10 tick",
+  "tick_size": 0.1,
+  "tick_basis": "NSE band of the RELIANCE close ₹1,187.00 on 2026-09-30",
+  "note": "A stop is a plan, not a guarantee: a gap or a fast market can fill past it."
+}

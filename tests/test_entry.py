@@ -1,11 +1,11 @@
-"""trader-entry tests. Fixtures in tests/fixtures/trader-entry/:
+"""trader-entry tests, offline. Fixtures in tests/fixtures/trader-entry/:
 
-TSLA-2026-10-19-5m.json  TSLA's Oct 19 2026 five-minute bars, cut from the reel's
-                         TSLA-60d5m.json (Yahoo chart JSON v8, fetched 10:49:45 ET).
-                         It ends with the in-progress 10:45 bar and Yahoo's live tick
-                         at 10:49:45. meta trimmed to one day, like a range=1d answer.
-DEMO-1m-synthetic.json   SYNTHETIC one-minute bars (not market data): a wick above the
-                         range high, a close AT the high, a null bar, a live tick.
+<SYMBOL>-2026-10-29-5m.json   real Yahoo v8 charts (range=5d, interval=5m) for RELIANCE, HDFCBANK,
+                              M&M, BAJAJ-AUTO and GAIL, fetched 2026-10-30 after the close
+                              (meta.regularMarketTime 15:28 IST); they hold Oct 23 to Oct 30, the
+                              15:20 bar of every day null, as Yahoo sends it
+The one-minute DEMO chart is SYNTHETIC (built here, not market data): a wick above the range
+high, a close AT the high, a null bar and a live tick.
 """
 
 import copy
@@ -22,53 +22,85 @@ from contextlib import redirect_stdout, redirect_stderr
 
 from _load import load, FIX, ROOT
 
-entry = load("trader-entry", "entry")
+entry = load("trader-entry", "entry")   # its bootstrap puts the repo root on sys.path
+from trader_common import clock  # noqa: E402
 
 EDIR = os.path.join(FIX, "trader-entry")
-TSLA = os.path.join(EDIR, "TSLA-2026-10-19-5m.json")
-DEMO = os.path.join(EDIR, "DEMO-1m-synthetic.json")
-OPEN_TS = 1792416600       # 2026-10-19 09:30 EDT
+REL = os.path.join(EDIR, "RELIANCE-2026-10-29-5m.json")
+HDFC = os.path.join(EDIR, "HDFCBANK-2026-10-29-5m.json")
+MM = os.path.join(EDIR, "M&M-2026-10-29-5m.json")
+BAJAJ = os.path.join(EDIR, "BAJAJ-AUTO-2026-10-29-5m.json")
+GAIL = os.path.join(EDIR, "GAIL-2026-10-29-5m.json")
 DT = datetime.datetime
+DAY = datetime.date(2026, 10, 29)
+OR_HIGH = 1170.5
 
 
-def ny(text):
+def ist(text):
     return entry.parse_now(text)
 
 
-def doc(path=TSLA):
-    with open(path) as fh:
+def doc(path=REL):
+    with open(path, encoding="utf-8") as fh:
         return json.load(fh)
 
 
-def chart(d=None, sym="TSLA"):
+def one_day(d=None, day=DAY):
+    """The chart cut to one session, the way a range=1d answer looks after that day's close."""
+    d = copy.deepcopy(d if d is not None else doc())
+    r = d["chart"]["result"][0]
+    q = r["indicators"]["quote"][0]
+    keep = [i for i, t in enumerate(r["timestamp"]) if clock.ts_to_ist(t).date() == day]
+    r["timestamp"] = [r["timestamp"][i] for i in keep]
+    for k in q:
+        q[k] = [q[k][i] for i in keep]
+    r["meta"]["regularMarketTime"] = clock.ist_ts(DT.combine(day, datetime.time(15, 29, 50)))
+    return d
+
+
+def chart(d=None, sym="RELIANCE"):
     return entry.parse_chart(json.dumps(d if d is not None else doc()), sym)
 
 
 def at(text, d=None, **kw):
-    return entry.evaluate(chart(d), ny(text), **kw)
-
-
-def shift_to(d, day, edt):
-    """The same session moved to another date: 9:30 New York is 13:30 UTC in EDT, 14:30 in EST."""
-    d = copy.deepcopy(d)
-    r = d["chart"]["result"][0]
-    new_open = int((DT.combine(day, datetime.time(13 if edt else 14, 30)) - DT(1970, 1, 1)).total_seconds())
-    delta = new_open - OPEN_TS
-    r["timestamp"] = [t + delta for t in r["timestamp"]]
-    r["meta"]["regularMarketTime"] += delta
-    r["meta"]["timezone"] = "EDT" if edt else "EST"
-    return d
+    return entry.evaluate(chart(d), ist(text), **kw)
 
 
 def no_breakout(d=None):
-    """Every bar after the range stays under the 362.18 high."""
-    d = copy.deepcopy(d if d is not None else doc())
-    q = d["chart"]["result"][0]["indicators"]["quote"][0]
-    for i in range(3, len(q["close"])):
-        q["close"][i] = min(q["close"][i], 362.00)
-        q["high"][i] = min(q["high"][i], 362.10)
-        q["open"][i] = min(q["open"][i], 362.00)
+    """Every bar after the range stays under the 1,170.50 high."""
+    d = copy.deepcopy(d if d is not None else one_day())
+    r = d["chart"]["result"][0]
+    q = r["indicators"]["quote"][0]
+    for i, t in enumerate(r["timestamp"]):
+        if clock.ts_to_ist(t).time() < datetime.time(9, 30) or q["close"][i] is None:
+            continue
+        q["close"][i] = min(q["close"][i], 1170.0)
+        q["high"][i] = min(q["high"][i], 1170.2)
+        q["open"][i] = min(q["open"][i], 1170.0)
     return d
+
+
+def demo_1m():
+    """SYNTHETIC one-minute bars on 2026-10-29 for DEMO: range 9:15-9:29 high 100.50; 9:30 wicks to
+    101 and closes 100.40; 9:31 closes AT 100.50; 9:32 is null; 9:33 closes 100.80 (the trigger);
+    then a live tick at 9:34:40."""
+    t0 = DT(2026, 10, 29, 9, 15)
+    ts, o, h, lo, c, v = [], [], [], [], [], []
+
+    def add(minute, hi, cl, vol=1000, sec=0):
+        ts.append(clock.ist_ts(t0 + datetime.timedelta(minutes=minute, seconds=sec)))
+        o.append(cl), h.append(hi), lo.append(None if cl is None else min(cl, 99.5)), c.append(cl), v.append(vol)
+    for m in range(15):
+        add(m, 100.5 if m == 7 else 100.2, 100.0)
+    add(15, 101.0, 100.4)
+    add(16, 100.5, 100.5)
+    add(17, None, None, None)
+    add(18, 100.9, 100.8, 3000)
+    add(19, 101.0, 101.0, 50, sec=40)
+    meta = {"symbol": "DEMO.NS", "dataGranularity": "1m", "regularMarketTime": ts[-1], "previousClose": 99.0}
+    return {"chart": {"result": [{"meta": meta, "timestamp": ts,
+                                  "indicators": {"quote": [{"open": o, "high": h, "low": lo, "close": c,
+                                                            "volume": v}]}}], "error": None}}
 
 
 def run(argv):
@@ -79,229 +111,215 @@ def run(argv):
 
 
 class TheReel(unittest.TestCase):
-    def test_triggers_at_1015_on_the_1010_bar(self):
-        r = at("2026-10-19 10:15")
+    def test_triggers_at_9_40_on_the_9_35_bar(self):
+        r = at("2026-10-29 10:15")
         self.assertEqual(r["status"], "triggered")
-        self.assertEqual(r["opening_range"]["high"], 362.18)
-        self.assertEqual(r["opening_range"]["low"], 354.47)
-        self.assertEqual(r["opening_range"]["bars"], 3)
+        self.assertEqual(r["opening_range"]["high"], 1170.5)
+        self.assertEqual(r["opening_range"]["low"], 1156.2)
         t = r["trigger"]
-        self.assertEqual(t["time"], "10:15 AM")
-        self.assertEqual(t["bar_start"], "10:10")
-        self.assertEqual(t["bar_index"], 8)
-        self.assertEqual(t["price"], 364.18)
-        self.assertEqual(t["close"], 364.1759948730469)
-        self.assertEqual(t["pct_over"], 0.55)
-        self.assertEqual(r["level"], 362.18)
-        self.assertEqual(r["prev_close"], 354.72)
+        self.assertEqual((t["time"], t["bar_start"], t["bar_index"], t["price"], t["pct_over"]),
+                         ("9:40 AM", "09:35", 4, 1174.3, 0.32))
+        lines = entry.describe(r)
+        self.assertIn("Opening range 9:15-9:30: high ₹1,170.50, low ₹1,156.20 (3 of 3 bars).", lines)
+        self.assertIn("TRIGGERED 9:40 AM at ₹1,174.30: the 9:35 bar (bar 4) closed above the range high "
+                      "₹1,170.50 (+0.32%).", lines)
+        self.assertIn("Nothing was placed.", lines)
 
-    def test_at_1012_the_1010_bar_is_still_forming(self):
-        r = at("2026-10-19 10:12")
+    def test_at_9_37_the_9_35_bar_is_still_forming(self):
+        r = at("2026-10-29 09:37")
         self.assertEqual(r["status"], "waiting")
-        self.assertIsNone(r["trigger"])
-        self.assertEqual(r["last"]["bar_start"], "10:05")
-        self.assertEqual(r["last"]["close"], 361.68)
-        self.assertEqual(r["forming"]["bar_start"], "10:10")
-        self.assertIn("$0.50 under the range high $362.18", r["reason"])
-        self.assertEqual(at("2026-10-19 10:14:59")["status"], "waiting")
+        self.assertEqual(r["forming"], {"bar_start": "09:35", "closes": "9:40 AM", "price": 1174.3})
+        lines = entry.describe(r)
+        self.assertIn("WAITING  last close ₹1,169.50 (9:30 bar), ₹1.00 under the range high "
+                      "₹1,170.50 (-0.09%).", lines)
+        self.assertIn("The 9:35 bar is still forming (₹1,174.30 so far, closes 9:40 AM); it does not count "
+                      "until it closes.", lines)
 
     def test_before_the_open_and_while_the_range_forms(self):
-        r = at("2026-10-19 09:20")
+        r = at("2026-10-29 09:00")
         self.assertEqual((r["status"], r["phase"]), ("waiting", "pre-open"))
-        r = at("2026-10-19 09:44")
+        self.assertIn("the NSE opens at 9:15", r["reason"])
+        r = at("2026-10-29 09:22")
         self.assertEqual((r["status"], r["phase"]), ("waiting", "forming"))
-        self.assertEqual(r["opening_range"]["bars"], 2)
-        self.assertFalse(r["opening_range"]["complete"])
-        r = at("2026-10-19 09:46")
-        self.assertEqual((r["status"], r["phase"]), ("waiting", "open"))
-        self.assertEqual(r["opening_range"]["bars"], 3)
+        self.assertIn("1 of 3 range bars closed; the range is set at 9:30", r["reason"])
 
     def test_the_live_tick_and_the_in_progress_bar_are_dropped(self):
-        c = chart()
-        self.assertEqual(c["bars"][-1]["t"], 1792421385)          # 10:49:45 is in the file
-        r = entry.evaluate(c, entry.utc_of(c["data_time"]))     # read as of the file's own time
-        self.assertEqual(r["now"], "2026-10-19 10:49:45")
-        self.assertEqual(r["_bars"][-1]["slot"], 14)               # the 10:40 bar
-        self.assertEqual(r["forming"]["bar_start"], "10:45")
-        self.assertEqual(r["bars_closed"], 15)
-        # 10:50: closed by the clock, but Yahoo's last trade (10:49:45) is before its close
-        r = at("2026-10-19 10:50")
-        self.assertEqual(r["_bars"][-1]["slot"], 14)
-        self.assertIn("Yahoo's last trade is 10:49:45", r["lag_note"])
-        # a minute later with no newer trade it counts; the 10:49:45 tick never becomes a bar
-        r = at("2026-10-19 10:51")
-        self.assertEqual(r["_bars"][-1]["slot"], 15)
-        self.assertEqual(r["bars_closed"], 16)
-        self.assertTrue(all(b["t"] % 300 == 0 for b in r["_bars"]))
+        d = one_day()
+        r_ = d["chart"]["result"][0]
+        q = r_["indicators"]["quote"][0]
+        live = clock.ist_ts(DT(2026, 10, 29, 9, 41, 45))
+        r_["timestamp"].append(live)
+        for k, v in (("open", 1190.0), ("high", 1190.0), ("low", 1190.0), ("close", 1190.0), ("volume", 0)):
+            q[k].append(v)
+        r = at("2026-10-29 09:39", d)
+        self.assertEqual(r["bars_closed"], 4)                    # 9:15 to 9:30; the 9:35 bar is still open
+        self.assertEqual(r["status"], "waiting")
 
     def test_after_the_close_it_stays_triggered_and_says_it_is_late(self):
-        r = at("2026-10-19 16:05")
+        r = at("2026-10-29 15:40")
         self.assertEqual((r["status"], r["phase"]), ("triggered", "after-close"))
-        self.assertEqual(r["trigger"]["time"], "10:15 AM")
+        self.assertGreater(r["minutes_since"], 300)
         text = "\n".join(entry.describe(r))
-        self.assertIn("minutes ago", text)
-        self.assertNotIn("This is the moment", text)
+        self.assertIn("A late entry is a different trade", text)
+        self.assertNotIn("This is the moment to get in", text)
+
+
+class OtherStocks(unittest.TestCase):
+    def test_hdfcbank_at_9_35(self):
+        r = entry.evaluate(entry.get_chart("HDFCBANK", "5m", offline=HDFC), ist("2026-10-29 10:15"))
+        self.assertEqual((r["trigger"]["time"], r["trigger"]["price"], r["level"]), ("9:35 AM", 682.5, 682.45))
+
+    def test_m_and_m_breaks_out_after_lunch(self):
+        ch = entry.get_chart("m&m.ns", "5m", offline=MM)
+        self.assertEqual(ch["symbol"], "M&M")
+        self.assertEqual(entry.evaluate(ch, ist("2026-10-29 10:15"))["status"], "waiting")
+        r = entry.evaluate(ch, ist("2026-10-29 14:50"))
+        self.assertEqual((r["trigger"]["time"], r["trigger"]["price"], r["trigger"]["bar_index"]),
+                         ("1:00 PM", 2891.6, 44))
+
+    def test_bajaj_auto_expires_at_14_45(self):
+        r = entry.evaluate(entry.get_chart("BAJAJ-AUTO", "5m", offline=BAJAJ), ist("2026-10-29 14:50"))
+        self.assertEqual((r["status"], r["no_entries_after"]), ("expired", "14:45"))
+        self.assertIn("no close above the range high ₹10,539.00 by 14:45", r["reason"])
+
+    def test_gail_trades_in_paise(self):
+        r = entry.evaluate(entry.get_chart("GAIL", "5m", offline=GAIL), ist("2026-10-29 14:50"))
+        self.assertEqual((r["level"], r["trigger"]["time"], r["trigger"]["price"]), (164.99, "12:15 PM", 165.05))
 
 
 class Rules(unittest.TestCase):
     def test_volume_confirmation_moves_the_trigger(self):
-        r = at("2026-10-19 10:49", min_volume_x=1)
-        self.assertEqual(r["opening_range"]["avg_volume"], 1658945)
+        r = at("2026-10-29 10:15", min_volume_x=1.0)
+        self.assertEqual(r["opening_range"]["avg_volume"], 368006)
         t = r["trigger"]
-        self.assertEqual((t["time"], t["bar_index"], t["price"]), ("10:35 AM", 12, 365.75))
-        self.assertEqual(t["volume_x"], 7.98)
-        r = at("2026-10-19 10:16", min_volume_x=1)
-        self.assertEqual(r["status"], "waiting")
-        self.assertIn("0.60x the range's volume, under your 1.00x", r["reason"])
+        self.assertEqual((t["time"], t["price"], t["bar_index"], t["volume_x"]), ("10:00 AM", 1173.8, 8, 2.26))
+        thin = at("2026-10-29 09:52", min_volume_x=1.0)
+        self.assertEqual(thin["status"], "waiting")
+        self.assertIn("under your 1.00x", thin["reason"])
+
+    def test_the_zero_volume_9_15_bar_is_left_out_of_the_average(self):
+        bars = [b for b in chart()["bars"] if clock.ts_to_ist(b["t"]).date() == DAY][:3]
+        self.assertEqual([b["v"] for b in bars], [0, 285741, 450272])
+        self.assertEqual(at("2026-10-29 10:15")["opening_range"]["avg_volume"], (285741 + 450272) // 2)
 
     def test_level_setup(self):
-        r = at("2026-10-19 10:30", setup="level", level=365.5)
-        self.assertEqual(r["trigger"]["time"], "10:25 AM")
-        self.assertEqual(r["trigger"]["bar_index"], 10)
-        self.assertEqual(r["trigger"]["price"], 365.75)
-        # a level under the open: the first eligible close is the 9:40 bar's, at 9:45 (no_entries_before)
-        r = at("2026-10-19 10:30", setup="level", level=350)
-        self.assertEqual((r["trigger"]["time"], r["trigger"]["bar_index"]), ("9:45 AM", 2))
-        with self.assertRaises(entry.EntryError):
-            at("2026-10-19 10:30", setup="level")
+        r = at("2026-10-29 14:00", setup="level", level=1175)
+        self.assertEqual((r["trigger"]["time"], r["trigger"]["price"], r["level"]), ("9:50 AM", 1175.9, 1175.0))
+        r = at("2026-10-29 14:00", setup="level", level=1180)
+        self.assertEqual(r["status"], "waiting")
+        self.assertIn("the level ₹1,180.00", r["reason"])
 
     def test_no_breakout_waits_then_expires_at_the_cutoff(self):
         d = no_breakout()
-        r = at("2026-10-19 10:49", d)
-        self.assertEqual(r["status"], "waiting")
-        self.assertEqual(at("2026-10-19 15:29", d)["status"], "waiting")
-        r = at("2026-10-19 15:30", d)
-        self.assertEqual(r["status"], "expired")
-        self.assertIn("by 15:30", r["reason"])
-        self.assertEqual(at("2026-10-19 16:30", d)["phase"], "after-close")
+        self.assertEqual(at("2026-10-29 14:40", d)["status"], "waiting")
+        r = at("2026-10-29 14:46", d)
+        self.assertEqual((r["status"], r["phase"]), ("expired", "after-cutoff"))
+        self.assertIn("by 14:45, the last time for a new entry", r["reason"])
 
     def test_the_bar_closing_at_the_cutoff_still_counts_when_yahoo_lags(self):
         d = no_breakout()
-        r0 = d["chart"]["result"][0]
-        keep = [i for i, t in enumerate(r0["timestamp"]) if t <= OPEN_TS + 14 * 300]   # live: up to the 10:40 bar
-        r0["timestamp"] = [r0["timestamp"][i] for i in keep]
-        q = r0["indicators"]["quote"][0]
+        r_ = d["chart"]["result"][0]
+        q = r_["indicators"]["quote"][0]
+        keep = [k for k, t in enumerate(r_["timestamp"]) if clock.ts_to_ist(t).strftime("%H:%M") <= "14:40"]
+        r_["timestamp"] = [r_["timestamp"][k] for k in keep]          # live: nothing after the 14:40 bar yet
         for k in q:
-            q[k] = [q[k][i] for i in keep]
-        r0["meta"]["regularMarketTime"] = OPEN_TS + 74 * 60 + 40                       # last trade 10:44:40
-        cfg = {"no_entries_before": "09:45", "no_entries_after": "10:45"}
-        r = at("2026-10-19 10:45:10", d, cfg=cfg)                           # the 10:40 bar closed by the clock only
-        self.assertEqual(r["status"], "waiting")
-        self.assertIn("Yahoo's last trade is 10:44:40", r["lag_note"])
-        self.assertEqual(at("2026-10-19 10:46", d, cfg=cfg)["status"], "expired")
+            q[k] = [q[k][j] for j in keep]
+        q["close"][-1] = 1171.0
+        d["chart"]["result"][0]["meta"]["regularMarketTime"] = clock.ist_ts(DT(2026, 10, 29, 14, 44, 50))
+        lag = at("2026-10-29 14:45:20", d)
+        self.assertEqual(lag["status"], "waiting")                  # Yahoo is 30 s behind the 14:45 close
+        self.assertIn("lag_note", lag)
+        r = at("2026-10-29 14:46:00", d)
+        self.assertEqual((r["status"], r["trigger"]["time"]), ("triggered", "2:45 PM"))
 
-    def test_config_cutoff(self):
-        cfg = {"no_entries_before": "09:45", "no_entries_after": "10:10"}
-        r = at("2026-10-19 10:15", cfg=cfg)
+    def test_config_window(self):
+        cfg = {"no_entries_before": "09:45", "no_entries_after": "14:45"}
+        r = at("2026-10-29 10:15", cfg=cfg)
+        self.assertEqual((r["trigger"]["time"], r["trigger"]["price"]), ("9:45 AM", 1174.5))
+        r = at("2026-10-29 09:42", cfg=cfg)
+        self.assertIn("no entries before 9:45 (config)", r["reason"])
+        r = at("2026-10-29 10:15", cfg={"no_entries_before": "09:30", "no_entries_after": "09:35"})
         self.assertEqual(r["status"], "expired")
-        cfg = {"no_entries_before": "10:20", "no_entries_after": "15:30"}
-        r = at("2026-10-19 10:30", cfg=cfg)
-        self.assertEqual(r["trigger"]["time"], "10:20 AM")       # the 10:15 bar, first to close at or after 10:20
 
     def test_bad_inputs(self):
+        for kw in ({"interval": "15m"}, {"or_minutes": 7}, {"setup": "vwap"}, {"setup": "level"}):
+            with self.assertRaises(entry.EntryError):
+                at("2026-10-29 10:15", **kw)
         with self.assertRaises(entry.EntryError):
-            at("2026-10-19 10:15", or_minutes=7)
-        with self.assertRaises(entry.EntryError):
-            at("2026-10-19 10:15", interval="15m")
-        with self.assertRaises(entry.EntryError):
-            entry.parse_now("tomorrow")
-        with self.assertRaises(entry.EntryError):
-            entry.parse_hhmm("25:00", "x")
-        self.assertEqual(entry.parse_now("2026-10-19 10:15"), DT(2026, 10, 19, 14, 15))
-        self.assertEqual(entry.parse_now("2026-10-19T14:15:00Z"), DT(2026, 10, 19, 14, 15))
-        self.assertEqual(entry.parse_now("2026-10-19 10:15 ET"), DT(2026, 10, 19, 14, 15))
+            entry.read_config.__wrapped__ if False else entry.parse_hhmm("25:00", "no_entries_after")
 
     def test_or_minutes_30(self):
-        r = at("2026-10-19 10:49", or_minutes=30)
-        self.assertEqual(r["opening_range"]["bars"], 6)
-        self.assertEqual(r["opening_range"]["high"], 362.92)
-        self.assertEqual(r["trigger"]["time"], "10:15 AM")
+        r = at("2026-10-29 10:15", or_minutes=30)
+        self.assertEqual((r["opening_range"]["high"], r["opening_range"]["of"]), (1175.7, 6))
+        self.assertEqual((r["trigger"]["time"], r["trigger"]["price"]), ("9:50 AM", 1175.9))
 
 
 class OneMinute(unittest.TestCase):
-    def c(self):
-        return entry.parse_chart(json.dumps(doc(DEMO)), "DEMO")
-
     def test_wick_and_close_at_the_high_do_not_trigger(self):
-        c = self.c()
-        r = entry.evaluate(c, entry.utc_of(c["data_time"]), interval="1m")
-        self.assertEqual(r["now"], "2026-10-19 10:06:30")
-        self.assertEqual(r["opening_range"], {"high": 100.5, "low": 99.0, "minutes": 15, "bars": 15, "of": 15,
-                                              "complete": True, "avg_volume": 10667})
-        t = r["trigger"]
-        self.assertEqual((t["time"], t["bar_start"], t["bar_index"], t["price"]), ("9:59 AM", "09:58", 28, 100.62))
-        r = entry.evaluate(c, ny("2026-10-19 09:58:59"), interval="1m")
+        r = entry.evaluate(chart(demo_1m(), "DEMO"), ist("2026-10-29 09:33"), interval="1m")
         self.assertEqual(r["status"], "waiting")
-        self.assertEqual(r["forming"]["bar_start"], "09:58")
-        self.assertEqual(r["last"]["close"], 100.5)             # the 9:57 bar closed AT the high
+        self.assertEqual(r["level"], 100.5)
+        r = entry.evaluate(chart(demo_1m(), "DEMO"), ist("2026-10-29 09:34:30"), interval="1m")
+        self.assertEqual((r["trigger"]["time"], r["trigger"]["price"], r["trigger"]["bar_start"]),
+                         ("9:34 AM", 100.8, "09:33"))
 
     def test_null_bar_tick_and_volume(self):
-        c = self.c()
-        r = entry.evaluate(c, entry.utc_of(c["data_time"]), interval="1m", min_volume_x=2)
-        self.assertEqual((r["trigger"]["time"], r["trigger"]["bar_index"]), ("10:02 AM", 31))
-        slots = [b["slot"] for b in r["_bars"]]
-        self.assertNotIn(19, slots)                               # 9:49 came as nulls
-        self.assertEqual(slots[-1], 35)                           # 10:06 still forming, 10:06:30 tick dropped
-        self.assertEqual(r["forming"]["bar_start"], "10:06")
+        ch = chart(demo_1m(), "DEMO")
+        self.assertEqual(len(ch["bars"]), 19)                           # the null 9:32 bar is dropped
+        r = entry.evaluate(ch, ist("2026-10-29 09:36"), interval="1m", min_volume_x=2)
+        self.assertEqual(r["trigger"]["volume_x"], 3.0)
+        self.assertEqual(r["bars_closed"], 18)                          # the 9:34:40 tick is not a bar
 
     def test_the_file_and_the_interval_must_agree(self):
-        code, _, err = run(["check", "DEMO", "--offline", DEMO])
-        self.assertEqual(code, 1)
-        self.assertIn("1m bars, not 5m", err)
+        tmp = tempfile.mkdtemp()
+        try:
+            p = os.path.join(tmp, "DEMO.json")
+            with open(p, "w") as fh:
+                json.dump(demo_1m(), fh)
+            with self.assertRaises(entry.EntryError) as cm:
+                entry.get_chart("DEMO", "5m", offline=p)
+            self.assertIn("DEMO has 1m bars, not 5m", str(cm.exception))
+        finally:
+            shutil.rmtree(tmp)
 
 
 class Calendar(unittest.TestCase):
-    def test_dst_both_sides(self):
-        for day, edt in ((datetime.date(2026, 12, 7), False), (datetime.date(2026, 11, 2), False),
-                         (datetime.date(2026, 10, 30), True), (datetime.date(2026, 3, 9), True)):
-            d = shift_to(doc(), day, edt)
-            r = entry.evaluate(chart(d), ny("%s 10:15" % day))
-            self.assertEqual(r["status"], "triggered", day)
-            self.assertEqual(r["trigger"]["time"], "10:15 AM", day)
-            self.assertEqual(r["trigger"]["bar_index"], 8, day)
-            self.assertEqual(entry.evaluate(chart(d), ny("%s 10:12" % day))["status"], "waiting", day)
-        # Dec 7 at 10:15 New York is 15:15 UTC
-        self.assertEqual(ny("2026-12-07 10:15"), DT(2026, 12, 7, 15, 15))
+    def tearDown(self):
+        clock.set_overrides(None)
 
-    def test_half_day_moves_the_cutoff_up(self):
-        d = shift_to(no_breakout(), datetime.date(2026, 11, 27), False)
-        r = entry.evaluate(chart(d), ny("2026-11-27 12:29"))
-        self.assertEqual(r["status"], "waiting")
-        self.assertEqual((r["closes"], r["no_entries_after"]), ("13:00", "12:30"))
-        r = entry.evaluate(chart(d), ny("2026-11-27 12:30"))
-        self.assertEqual(r["status"], "expired")
-        self.assertIn("early close", r["reason"])
-        r = entry.evaluate(chart(shift_to(doc(), datetime.date(2026, 11, 27), False)), ny("2026-11-27 10:15"))
-        self.assertEqual(r["trigger"]["time"], "10:15 AM")
-        self.assertIn("Early close today", "\n".join(entry.describe(r)))
-        # a cutoff already before the early close stays put
-        cfg = {"no_entries_before": "09:45", "no_entries_after": "12:00"}
-        self.assertEqual(entry.evaluate(chart(d), ny("2026-11-27 11:00"), cfg=cfg)["no_entries_after"], "12:00")
-
-    def test_weekend_holiday_and_empty_data(self):
-        r = at("2026-10-17 10:30")
-        self.assertEqual((r["status"], r["phase"]), ("no-data", "closed"))
-        self.assertEqual(r["next_open"], "2026-10-19 09:30")
-        r = at("2026-11-26 10:30")
-        self.assertIn("Thanksgiving", r["reason"])
-        empty = copy.deepcopy(doc())
-        res = empty["chart"]["result"][0]
-        del res["timestamp"]
-        res["indicators"] = {"quote": [{}]}
-        r = at("2026-10-19 10:15", empty)
-        self.assertEqual((r["status"], r["phase"]), ("no-data", "open"))
-        r = at("2026-10-20 10:15")                                # Yahoo sent yesterday's bars only
-        self.assertEqual(r["status"], "no-data")
-        self.assertFalse(at("2028-03-01 10:30")["calendar_known"])
-
-    def test_yahoo_errors(self):
-        bad = json.dumps({"chart": {"result": None, "error": {"code": "Not Found",
-                                                              "description": "No data found, symbol may be delisted"}}})
-        with self.assertRaises(entry.EntryError) as cm:
-            entry.parse_chart(bad, "ZZZZ")
-        self.assertIn("No data found", str(cm.exception))
+    def test_ist_all_year(self):
+        self.assertEqual(ist("2026-01-15 09:15"), DT(2026, 1, 15, 3, 45))
+        self.assertEqual(ist("2026-07-15 09:15"), DT(2026, 7, 15, 3, 45))
+        self.assertEqual(ist("2026-10-29T04:45:00Z"), DT(2026, 10, 29, 4, 45))
+        self.assertEqual(ist("2026-10-29 10:15 IST"), DT(2026, 10, 29, 4, 45))
         with self.assertRaises(entry.EntryError):
-            entry.parse_chart("<html>", "TSLA")
+            ist("tomorrow")
+
+    def test_weekend_holiday_and_next_open(self):
+        r = at("2026-10-31 10:00")
+        self.assertEqual((r["status"], r["phase"]), ("no-data", "closed"))
+        self.assertIn("weekend", r["reason"])
+        r = at("2026-11-10 10:00")
+        self.assertIn("NSE holiday: Diwali-Balipratipada", r["reason"])
+        self.assertEqual(r["next_open"], "2026-11-11 09:15")
+        self.assertIn("Next open: 2026-11-11 09:15 IST.", entry.describe(r))
+
+    def test_a_holiday_override_from_the_config(self):
+        self.addCleanup(clock.set_overrides, None)
+        clock.set_overrides({"2026-10-29": "ad-hoc closure"})
+        self.assertIn("ad-hoc closure", at("2026-10-29 10:15")["reason"])
+        clock.set_overrides({"2026-11-10": None})
+        self.assertNotEqual(at("2026-11-10 10:00")["phase"], "closed")
+
+    def test_a_year_without_a_holiday_list_says_so(self):
+        r = at("2027-01-05 10:00")
+        self.assertFalse(r["calendar_known"])
+        self.assertTrue(any("Holiday list covers 2026 only" in x for x in entry.describe(r)))
+
+    def test_no_bars_for_the_day(self):
+        r = at("2026-10-29 10:15", one_day(day=datetime.date(2026, 10, 30)))
+        self.assertEqual(r["status"], "no-data")
+        self.assertIn("Yahoo sent no bars", r["reason"])
 
 
 class Network(unittest.TestCase):
@@ -311,8 +329,7 @@ class Network(unittest.TestCase):
         self.calls, self.sleeps = [], []
         self._open, self._sleep = entry._open_url, entry._sleep
         entry._sleep = lambda s: self.sleeps.append(s)
-        with open(TSLA) as fh:
-            self.body = fh.read()
+        self.body = json.dumps(one_day())
 
     def tearDown(self):
         entry._open_url, entry._sleep = self._open, self._sleep
@@ -331,50 +348,54 @@ class Network(unittest.TestCase):
 
     def test_url_and_429_retry_once_after_a_pause(self):
         self.answers(429, 200)
-        c = entry.get_chart("TSLA", "5m", datetime.date(2026, 10, 19), today=datetime.date(2026, 10, 19))
-        self.assertEqual(len(c["bars"]), 17)
-        self.assertEqual(self.calls, ["https://query2.finance.yahoo.com/v8/finance/chart/TSLA?range=1d&interval=5m"] * 2)
+        c = entry.get_chart("RELIANCE", "5m", DAY, today=DAY)
+        self.assertEqual(len(c["bars"]), 74)
+        self.assertEqual(self.calls, ["https://query2.finance.yahoo.com/v8/finance/chart/RELIANCE.NS?range=1d&"
+                                      "interval=5m"] * 2)
         self.assertEqual(self.sleeps, [entry.BACKOFF])
 
     def test_429_twice_falls_back_to_query1(self):
         self.answers(429, 429, 200)
-        entry.get_chart("TSLA", "5m", datetime.date(2026, 10, 19), today=datetime.date(2026, 10, 19))
+        entry.get_chart("RELIANCE", "5m", DAY, today=DAY)
         self.assertEqual([u.split("/")[2] for u in self.calls],
                          ["query2.finance.yahoo.com", "query2.finance.yahoo.com", "query1.finance.yahoo.com"])
 
     def test_5xx_falls_back_without_waiting(self):
         self.answers(503, 200)
-        entry.get_chart("TSLA", "5m", datetime.date(2026, 10, 19), today=datetime.date(2026, 10, 19))
+        entry.get_chart("RELIANCE", "5m", DAY, today=DAY)
         self.assertEqual(self.sleeps, [])
         self.assertIn("query1", self.calls[1])
 
     def test_still_busy_is_one_plain_error(self):
         self.answers(429, 429, 429, 429)
-        code, out, err = run(["check", "TSLA", "--now", "2026-10-19 10:15"])
+        code, out, err = run(["check", "RELIANCE", "--now", "2026-10-29 10:15"])
         self.assertEqual(code, 1)
         self.assertIn("HTTP 429", err)
         self.assertNotIn("Traceback", err)
 
-    def test_unknown_ticker_404(self):
+    def test_unknown_symbol_404(self):
         self.answers(404)
         with self.assertRaises(entry.EntryError) as cm:
-            entry.get_chart("ZZZZ", "5m", datetime.date(2026, 10, 19), today=datetime.date(2026, 10, 19))
+            entry.get_chart("ZZZZ", "5m", DAY, today=DAY)
         self.assertIn("No data found", str(cm.exception))
 
-    def test_ranges_for_past_sessions(self):
-        today = datetime.date(2026, 10, 20)
+    def test_ranges_and_quoted_symbols(self):
+        today = datetime.date(2026, 10, 30)
         self.assertEqual(entry.chart_range(today, today, "5m"), "1d")
-        self.assertEqual(entry.chart_range(datetime.date(2026, 10, 19), today, "5m"), "5d")
-        self.assertEqual(entry.chart_range(datetime.date(2026, 10, 1), today, "5m"), "1mo")
-        self.assertEqual(entry.chart_range(datetime.date(2026, 8, 31), today, "5m"), "60d")
+        self.assertEqual(entry.chart_range(DAY, today, "5m"), "5d")
+        self.assertEqual(entry.chart_range(datetime.date(2026, 10, 9), today, "5m"), "1mo")
+        self.assertEqual(entry.chart_range(datetime.date(2026, 9, 10), today, "5m"), "60d")
         with self.assertRaises(entry.EntryError):
-            entry.chart_range(datetime.date(2026, 10, 1), today, "1m")
-        self.assertIn("/chart/BRK-B?", entry.chart_path("brk.b", "1d", "5m"))
+            entry.chart_range(datetime.date(2026, 10, 9), today, "1m")
+        with self.assertRaises(entry.EntryError):
+            entry.chart_range(datetime.date(2026, 7, 1), today, "5m")
+        self.assertIn("/chart/M%26M.NS?", entry.chart_path("M&M", "1d", "5m"))
+        self.assertIn("/chart/BAJAJ-AUTO.NS?", entry.chart_path("BAJAJ-AUTO", "1d", "5m"))
 
 
 def live_provider(d, lag_until=None, calls=None):
-    """Bars the way Yahoo serves them at `now`: closed bars final, the in-progress bar
-    showing a spike to 363.00 (above the high, then it closes under), plus a live tick.
+    """Bars the way Yahoo serves them at `now`: closed bars final, the in-progress bar showing a
+    spike to 1,171.00 (above the 1,170.50 high, then it closes under), plus a live tick.
     lag_until: before this UTC time Yahoo's last trade lags 30 seconds behind."""
     base = chart(d)
 
@@ -390,11 +411,11 @@ def live_provider(d, lag_until=None, calls=None):
                 continue
             b = dict(b)
             if b["t"] + 300 > data_ts:
-                b["c"], b["h"] = 363.00, max(b["h"], 363.00)
+                b["c"], b["h"] = 1171.0, max(b["h"], 1171.0)
             bars.append(b)
         if data_ts % 300:
-            bars.append({"t": data_ts, "o": 363.0, "h": 363.0, "l": 363.0, "c": 363.0, "v": 0})
-        return {"symbol": "TSLA", "meta": {}, "bars": bars, "prev_close": 354.72, "data_time": data_ts}
+            bars.append({"t": data_ts, "o": 1171.0, "h": 1171.0, "l": 1171.0, "c": 1171.0, "v": 0})
+        return {"symbol": "RELIANCE", "meta": {}, "bars": bars, "prev_close": 1158.0, "data_time": data_ts}
     return provider
 
 
@@ -402,43 +423,42 @@ class Watch(unittest.TestCase):
     OPTS = {"setup": "orb", "or_minutes": 15, "interval": "5m", "level": None, "min_volume_x": None, "cfg": None}
 
     def loop(self, provider, start, **kw):
-        clock = entry.SimClock(ny(start))
+        sim = entry.SimClock(ist(start))
         lines, fired = [], []
-        code, res = entry.watch_loop(provider, clock.now, clock.sleep, lines.append, dict(self.OPTS),
+        code, res = entry.watch_loop(provider, sim.now, sim.sleep, lines.append, dict(self.OPTS),
                                      on_trigger=lambda r, now: fired.append((r, now)), **kw)
-        return code, res, lines, fired, clock
+        return code, res, lines, fired, sim
 
     def test_fires_on_the_first_closed_bar_not_the_spike_in_progress(self):
         calls = []
-        code, res, lines, fired, clock = self.loop(live_provider(doc(), calls=calls), "2026-10-19 10:07", every=60)
+        code, res, lines, fired, sim = self.loop(live_provider(one_day(), calls=calls), "2026-10-29 09:32", every=60)
         self.assertEqual(code, 0)
         self.assertEqual(len(fired), 1)
-        self.assertEqual(fired[0][0]["trigger"]["time"], "10:15 AM")
-        self.assertEqual(fired[0][0]["trigger"]["price"], 364.18)
-        # it looked at 10:07 (10:05 bar spiking to 363 in progress) and at 10:10:02 (that bar closed 361.68)
-        self.assertEqual([entry.to_eastern(c).strftime("%H:%M:%S") for c in calls], ["10:07:00", "10:10:02", "10:15:02"])
+        self.assertEqual((fired[0][0]["trigger"]["time"], fired[0][0]["trigger"]["price"]), ("9:40 AM", 1174.3))
+        self.assertEqual([entry.to_ist(c).strftime("%H:%M:%S") for c in calls], ["09:32:00", "09:35:02", "09:40:02"])
         text = "\n".join(lines)
-        self.assertIn("10:05 bar  closed $361.68  $0.50 under $362.18", text)
-        self.assertIn("10:10 bar  closed $364.18  TRIGGERED", text)
+        self.assertIn(" 9:30 bar  closed ₹1,169.50  ₹1.00 under ₹1,170.50", text)
+        self.assertIn(" 9:35 bar  closed ₹1,174.30  TRIGGERED", text)
         self.assertEqual(text.count("TRIGGERED"), 1)
 
     def test_waits_for_yahoo_to_catch_up(self):
-        lag = ny("2026-10-19 10:15:30")
+        lag = ist("2026-10-29 09:40:30")
         calls = []
-        code, res, lines, fired, clock = self.loop(live_provider(doc(), lag_until=lag, calls=calls),
-                                                   "2026-10-19 10:12", every=30)
+        code, res, lines, fired, sim = self.loop(live_provider(one_day(), lag_until=lag, calls=calls),
+                                                 "2026-10-29 09:37", every=30)
         self.assertEqual(code, 0)
-        times = [entry.to_eastern(c).strftime("%H:%M:%S") for c in calls]
-        self.assertEqual(times, ["10:12:00", "10:15:02", "10:15:32"])   # 10:15:02: Yahoo still at 10:14:32
-        self.assertEqual(fired[0][0]["trigger"]["time"], "10:15 AM")
+        times = [entry.to_ist(c).strftime("%H:%M:%S") for c in calls]
+        self.assertEqual(times, ["09:37:00", "09:40:02", "09:40:32"])   # 9:40:02: Yahoo still at 9:39:32
+        self.assertEqual(fired[0][0]["trigger"]["time"], "9:40 AM")
 
     def test_from_before_the_open_prints_the_range_bar_by_bar(self):
-        code, res, lines, fired, clock = self.loop(live_provider(doc()), "2026-10-19 09:00", every=30)
+        code, res, lines, fired, sim = self.loop(live_provider(one_day()), "2026-10-29 09:00", every=30)
         self.assertEqual(code, 0)
         text = "\n".join(lines)
         self.assertIn("not open yet", lines[0])
-        self.assertIn(" 9:40 bar  closed $360.39  opening range set: high $362.18, low $354.47", text)
-        self.assertEqual(sum(1 for x in lines if " bar  closed " in x), 9)    # 9:30 ... 10:10, one line each
+        self.assertIn(" 9:25 bar  closed ₹1,169.00  opening range set: high ₹1,170.50, low ₹1,156.20",
+                      text)
+        self.assertEqual(sum(1 for x in lines if " bar  closed " in x), 5)    # 9:15 ... 9:35, one line each
 
     def test_a_computer_that_dozes_off_catches_up_when_it_wakes(self):
         class Dozing(entry.SimClock):
@@ -447,40 +467,40 @@ class Watch(unittest.TestCase):
             def sleep(self, seconds):
                 entry.SimClock.sleep(self, seconds)
                 self.naps += 1
-                if self.naps == 3:                      # the laptop sleeps for 17 minutes mid-wait
-                    self.t += datetime.timedelta(minutes=17)
-        clock = Dozing(ny("2026-10-19 09:46"))
+                if self.naps == 3:                      # the laptop sleeps for 12 minutes mid-wait
+                    self.t += datetime.timedelta(minutes=12)
+        sim = Dozing(ist("2026-10-29 09:21"))
         calls, lines = [], []
-        code, res = entry.watch_loop(live_provider(doc(), calls=calls), clock.now, clock.sleep, lines.append,
+        code, res = entry.watch_loop(live_provider(one_day(), calls=calls), sim.now, sim.sleep, lines.append,
                                      dict(self.OPTS), every=30)
         self.assertEqual(code, 0)
-        times = [entry.to_eastern(c).strftime("%H:%M:%S") for c in calls]
-        self.assertEqual(times[:2], ["09:46:00", "10:04:30"])   # straight after waking, not a long sleep later
+        times = [entry.to_ist(c).strftime("%H:%M:%S") for c in calls]
+        self.assertEqual(times[:2], ["09:21:00", "09:34:30"])   # straight after waking, not a long sleep later
         text = "\n".join(lines)
-        for start in (" 9:45", " 9:50", " 9:55", "10:00"):
-            self.assertIn(start + " bar  closed", text)          # the bars it slept through, one line each
-        self.assertEqual(res["trigger"]["time"], "10:15 AM")
+        for start in (" 9:20", " 9:25", " 9:30"):
+            self.assertIn(start + " bar  closed", text)    # the bars it slept through, one line each
+        self.assertEqual(res["trigger"]["time"], "9:40 AM")
 
     def test_expires_and_until(self):
-        code, res, lines, fired, clock = self.loop(live_provider(no_breakout()), "2026-10-19 15:00", every=300)
+        code, res, lines, fired, sim = self.loop(live_provider(no_breakout()), "2026-10-29 14:00", every=300)
         self.assertEqual(code, 1)
         self.assertEqual(res["status"], "expired")
         self.assertEqual(fired, [])
-        self.assertEqual(entry.to_eastern(clock.now()).strftime("%H:%M"), "15:30")
-        until = DT(2026, 10, 19, 11, 0)
-        code, res, lines, fired, clock = self.loop(live_provider(no_breakout()), "2026-10-19 10:30", every=300,
-                                                   until=until)
+        self.assertEqual(entry.to_ist(sim.now()).strftime("%H:%M"), "14:45")
+        until = DT(2026, 10, 29, 11, 0)
+        code, res, lines, fired, sim = self.loop(live_provider(no_breakout()), "2026-10-29 10:30", every=300,
+                                                 until=until)
         self.assertEqual(code, 1)
         self.assertIn("--until 11:00", lines[-1])
 
     def test_closed_day_and_repeated_errors(self):
-        code, _, lines, _, _ = self.loop(live_provider(doc()), "2026-10-17 10:00")
+        code, _, lines, _, _ = self.loop(live_provider(one_day()), "2026-10-31 10:00")
         self.assertEqual(code, 1)
         self.assertIn("weekend", lines[0])
 
         def broken(now):
             raise entry.EntryError("Yahoo did not answer")
-        code, _, lines, _, _ = self.loop(broken, "2026-10-19 10:00", every=30)
+        code, _, lines, _, _ = self.loop(broken, "2026-10-29 10:00", every=30)
         self.assertEqual(code, 1)
         self.assertIn("Stopping after 5 failed reads", lines[-1])
 
@@ -496,89 +516,106 @@ class Cli(unittest.TestCase):
         shutil.rmtree(self.d)
 
     def test_check_write_is_the_contract_shape(self):
-        code, text, _ = run(["check", "TSLA", "--offline", TSLA, "--now", "2026-10-19 10:15", "--write"])
+        code, text, _ = run(["check", "RELIANCE", "--offline", REL, "--now", "2026-10-29 10:15", "--write"])
         self.assertEqual(code, 0)
-        self.assertIn("TRIGGERED 10:15 AM at $364.18", text)
+        self.assertIn("TRIGGERED 9:40 AM at ₹1,174.30", text)
         self.assertIn("/trader-exit", text)
         with open(os.path.join("trader", "entry.json")) as fh:
             e = json.load(fh)
-        want = {"created_by": "trader-entry", "symbol": "TSLA", "setup": "orb", "side": "buy", "date": "2026-10-19",
-                "status": "triggered", "time": "10:15 AM", "bar_start": "10:10", "bar_index": 8, "price": 364.18,
-                "level": 362.18, "interval": "5m", "opening_range": {"high": 362.18, "low": 354.47, "minutes": 15},
-                "source": "yahoo", "checked_at": "2026-10-19T14:15:00Z"}
+        want = {"created_by": "trader-entry", "symbol": "RELIANCE", "setup": "orb", "side": "buy",
+                "date": "2026-10-29", "status": "triggered", "time": "9:40 AM", "bar_start": "09:35",
+                "bar_index": 4, "price": 1174.3, "level": 1170.5, "interval": "5m",
+                "opening_range": {"high": 1170.5, "low": 1156.2, "minutes": 15}, "source": "yahoo",
+                "checked_at": "2026-10-29T04:45:00Z"}
         for k, v in want.items():
             self.assertEqual(e[k], v, k)
 
     def test_check_waiting_json_and_exit_codes(self):
-        code, text, _ = run(["check", "TSLA", "--offline", TSLA, "--now", "2026-10-19 10:12", "--json"])
+        code, text, _ = run(["check", "RELIANCE", "--offline", REL, "--now", "2026-10-29 09:37", "--json"])
         self.assertEqual(code, 1)
         r = json.loads(text)
         self.assertEqual(r["status"], "waiting")
         self.assertNotIn("_bars", r)
-        code, text, _ = run(["check", "TSLA", "--offline", TSLA, "--now", "2026-10-19 10:12", "--write", "e.json"])
+        code, text, _ = run(["check", "RELIANCE", "--offline", REL, "--now", "2026-10-29 09:37", "--write", "e.json"])
         with open("e.json") as fh:
             self.assertEqual(json.load(fh)["status"], "waiting")
         self.assertIn("still forming", text)
 
-    def test_offline_gz_folder_and_mismatch(self):
+    def test_offline_gz_folder_yahoo_names_and_mismatch(self):
         os.mkdir("charts")
-        with open(TSLA, "rb") as src, gzip.open(os.path.join("charts", "TSLA.json.gz"), "wb") as dst:
+        with open(REL, "rb") as src, gzip.open(os.path.join("charts", "RELIANCE.json.gz"), "wb") as dst:
             dst.write(src.read())
-        code, text, _ = run(["check", "tsla", "--offline", "charts", "--now", "2026-10-19 10:15"])
+        shutil.copy(MM, os.path.join("charts", "M&M.NS.json"))
+        code, text, _ = run(["check", "reliance.ns", "--offline", "charts", "--now", "2026-10-29 10:15"])
         self.assertEqual(code, 0)
-        code, _, err = run(["check", "NVDA", "--offline", TSLA])
+        code, text, _ = run(["check", "M&M", "--offline", "charts", "--now", "2026-10-29 14:50"])
+        self.assertIn("TRIGGERED 1:00 PM at ₹2,891.60", text)
+        code, _, err = run(["check", "HDFCBANK", "--offline", REL])
         self.assertEqual(code, 1)
-        self.assertIn("holds TSLA, not NVDA", err)
+        self.assertIn("holds RELIANCE, not HDFCBANK", err)
+        code, _, err = run(["check", "BRK.B", "--offline", REL])
+        self.assertIn("is not an NSE symbol", err)
+
+    def test_offline_without_now_reads_the_file_as_of_its_own_time(self):
+        code, text, _ = run(["check", "RELIANCE", "--offline", REL, "--json"])
+        r = json.loads(text)
+        self.assertEqual(r["date"], "2026-10-30")
+        self.assertEqual(r["data_time"], "2026-10-30 15:28:17")
 
     def test_longs_only_and_flag_errors(self):
-        code, _, err = run(["check", "TSLA", "--offline", TSLA, "--side", "short"])
+        code, _, err = run(["check", "RELIANCE", "--offline", REL, "--side", "short"])
         self.assertEqual(code, 1)
-        self.assertIn("v2 plans longs only", err)
-        code, _, err = run(["check", "TSLA", "--offline", TSLA, "--level", "300"])
+        self.assertIn("longs only", err)
+        code, _, err = run(["check", "RELIANCE", "--offline", REL, "--level", "1180"])
         self.assertIn("--level is for --setup level", err)
-        code, _, err = run(["check", "TSLA", "--offline", TSLA, "--setup", "level"])
+        code, _, err = run(["check", "RELIANCE", "--offline", REL, "--setup", "level"])
         self.assertIn("needs --level", err)
+        code, _, err = run(["check", "RELIANCE", "--offline", REL, "--min-volume-x", "0"])
+        self.assertIn("--min-volume-x must be above 0", err)
 
     def test_config_is_read(self):
         os.mkdir("trader")
         with open(os.path.join("trader", "config.json"), "w") as fh:
-            json.dump({"no_entries_after": "10:10"}, fh)
-        code, text, _ = run(["check", "TSLA", "--offline", TSLA, "--now", "2026-10-19 10:15"])
+            json.dump({"no_entries_after": "09:35"}, fh)
+        code, text, _ = run(["check", "RELIANCE", "--offline", REL, "--now", "2026-10-29 10:15"])
         self.assertEqual(code, 1)
         self.assertIn("EXPIRED", text)
         with open(os.path.join("trader", "config.json"), "w") as fh:
             fh.write("{nope")
-        code, _, err = run(["check", "TSLA", "--offline", TSLA])
+        code, _, err = run(["check", "RELIANCE", "--offline", REL])
         self.assertIn("not valid JSON", err)
 
     def test_watch_replays_the_file_and_writes_the_entry(self):
-        code, text, _ = run(["watch", "TSLA", "--offline", TSLA, "--now", "2026-10-19 09:50", "--every", "30"])
+        code, text, _ = run(["watch", "RELIANCE", "--offline", REL, "--now", "2026-10-29 09:20", "--every", "30"])
         self.assertEqual(code, 0)
-        self.assertIn("10:10 bar  closed $364.18  TRIGGERED", text)
+        self.assertIn(" 9:35 bar  closed ₹1,174.30  TRIGGERED", text)
         with open(os.path.join("trader", "entry.json")) as fh:
-            self.assertEqual(json.load(fh)["bar_index"], 8)
-        code, text, _ = run(["watch", "TSLA", "--offline", TSLA, "--now", "2026-10-19 09:50", "--until", "10:00",
+            self.assertEqual(json.load(fh)["bar_index"], 4)
+        code, text, _ = run(["watch", "RELIANCE", "--offline", REL, "--now", "2026-10-29 09:20", "--until", "09:35",
                              "--out", "x.json"])
         self.assertEqual(code, 1)
         self.assertFalse(os.path.exists("x.json"))
 
     def test_watchlist(self):
         os.mkdir("charts")
-        shutil.copy(TSLA, os.path.join("charts", "TSLA.json"))
-        shutil.copy(DEMO, os.path.join("charts", "DEMO.json"))
+        shutil.copy(REL, os.path.join("charts", "RELIANCE.json"))
+        shutil.copy(BAJAJ, os.path.join("charts", "BAJAJ-AUTO.json"))
+        with open(os.path.join("charts", "DEMO.json"), "w") as fh:
+            json.dump(demo_1m(), fh)
         os.mkdir("trader")
         with open(os.path.join("trader", "watchlist.json"), "w") as fh:
             json.dump({"created_by": "trader-scanner", "hits": [
-                {"symbol": "TSLA", "setups": ["orb"], "or_high": 362.18, "or_low": 354.47},
-                {"symbol": "ZZZZ", "setups": ["orb"]}, {"symbol": "DEMO", "setups": ["orb"]}]}, fh)
-        code, text, _ = run(["watchlist", "--offline", "charts", "--now", "2026-10-19 10:15"])
+                {"symbol": "RELIANCE", "setups": ["orb"]}, {"symbol": "ZZZZ", "setups": ["orb"]},
+                {"symbol": "DEMO", "setups": ["orb"]}, {"symbol": "BAJAJ-AUTO", "setups": ["orb"]}]}, fh)
+        code, text, _ = run(["watchlist", "--offline", "charts", "--now", "2026-10-29 10:15"])
         self.assertEqual(code, 0)
         rows = text.splitlines()
-        self.assertTrue(rows[1].startswith("TSLA    triggered  10:15 AM  $364.18   $362.18"), rows[1])
-        self.assertIn("ZZZZ    error: no offline file", rows[2])
-        self.assertIn("DEMO    error: DEMO has 1m bars", rows[3])
-        self.assertIn("1 of 3 triggered", text)
-        code, text, _ = run(["watchlist", "--offline", "charts", "--now", "2026-10-19 10:12", "--json"])
+        self.assertTrue(rows[1].startswith("RELIANCE    triggered  9:40 AM   ₹1,174.30"), rows[1])
+        self.assertIn("ZZZZ        error: no offline file", rows[2])
+        self.assertIn("DEMO        error: DEMO has 1m bars", rows[3])
+        self.assertTrue(rows[4].startswith("BAJAJ-AUTO  waiting"), rows[4])
+        self.assertIn("1 of 4 triggered", text)
+        code, text, _ = run(["watchlist", "--offline", "charts", "--now", "2026-10-29 09:37", "--json"])
         self.assertEqual(code, 1)
         self.assertEqual(json.loads(text)[0]["result"]["status"], "waiting")
         code, _, err = run(["watchlist", "--watchlist", "missing.json"])
@@ -595,10 +632,11 @@ class SkillDoc(unittest.TestCase):
         self.assertGreater(len(text.splitlines()), 60)
         self.assertEqual(text[text.index("## Safety"):], risk[risk.index("## Safety"):])
         low = " ".join(text.lower().split())
-        for must in ("bar by bar", "can lag", "day trading loses most people money", "/trader-exit", "longs only", "in the background", "/loop", "nothing was placed", "10:15 am", "$364.18", "bar 8"):
-            self.assertIn(must, low)
-        for never in ("\u2014", "tick " + "by tick", "real " + "time", "pro" + "fit"):
-            self.assertNotIn(never, low)
+        for must in ("bar by bar", "can lag", "/trader-exit", "long side only", "in the background", "/loop",
+                     "nothing was placed", "9:40 am", "₹1,174.30", "bar 4", "9:15", "14:45", "ist"):
+            self.assertIn(must, low, must)
+        for never in ("\u2014", "tick " + "by tick", "real " + "time", "pro" + "fit", "tsla", "new york", "nyse"):
+            self.assertNotIn(never, low, never)
 
 
 if __name__ == "__main__":

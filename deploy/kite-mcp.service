@@ -1,0 +1,45 @@
+# /etc/systemd/system/kite-mcp.service: zerodha/kite-mcp-server, loopback only.
+# Installed by deploy/bootstrap.sh. Kite sessions live in the server's memory, so every
+# restart means a fresh Kite login (see deploy/README.md, "Daily routine").
+
+[Unit]
+Description=Kite MCP server (zerodha/kite-mcp-server), 127.0.0.1 only
+Documentation=https://github.com/zerodha/kite-mcp-server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=kite-mcp
+Group=kite-mcp
+EnvironmentFile=/etc/kite-mcp/kite.env
+# env on the command line wins over the EnvironmentFile: the listener can never be 0.0.0.0.
+ExecStart=/usr/bin/env APP_HOST=127.0.0.1 /usr/local/bin/kite-mcp-server
+Restart=always
+RestartSec=5
+
+# Sandbox. The server keeps everything in memory and writes no files.
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
