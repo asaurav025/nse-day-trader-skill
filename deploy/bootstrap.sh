@@ -37,8 +37,13 @@ SSHD_DROPIN=/etc/ssh/sshd_config.d/10-kite-hardening.conf
 
 # Go toolchain for the source fallback (kite-mcp-server v0.3.2 needs go >= 1.24.2).
 GO_VERSION=go1.24.13
-GO_SHA256_amd64=1fc94b57134d51669c72173ad5d49fd62afb0f1db9bf3f798fd98ee423f8d730
-GO_SHA256_arm64=74d97be1cc3a474129590c67ebf748a96e72d9f3a2b6fef3ed3275de591d49b3
+go_sha256() {
+    case "$1" in
+        amd64) printf '%s' 1fc94b57134d51669c72173ad5d49fd62afb0f1db9bf3f798fd98ee423f8d730 ;;
+        arm64) printf '%s' 74d97be1cc3a474129590c67ebf748a96e72d9f3a2b6fef3ed3275de591d49b3 ;;
+        *) return 1 ;;
+    esac
+}
 
 log() { printf '\n==> %s\n' "$*"; }
 note() { printf '    %s\n' "$*"; }
@@ -50,6 +55,7 @@ die() { printf 'bootstrap.sh: %s\n' "$*" >&2; exit 1; }
 [[ -r "$ENV_FILE" ]] || die "no $ENV_FILE: copy .env.deploy.example to .env.deploy and fill it in"
 [[ -r "$HERE/kite.env.example" && -r "$HERE/kite-mcp.service" && -r "$HERE/check-egress-ip.sh" ]] \
     || die "run from a full copy of the deploy/ folder"
+# shellcheck source=/dev/null
 os_id=$(. /etc/os-release && printf '%s' "${ID:-}")
 [[ "$os_id" == "ubuntu" ]] || die "this script targets Ubuntu LTS (found ${os_id:-unknown})"
 
@@ -78,8 +84,9 @@ host_re='^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$'
     || die "KITE_HOSTNAME must be a lower-case DNS name like kite.example.in"
 [[ "$KITE_HOSTNAME" != "kite.example.in" ]] || die "KITE_HOSTNAME is still the placeholder"
 [[ -n "${CF_TUNNEL_TOKEN:-}" ]] || die "CF_TUNNEL_TOKEN is empty"
-[[ "$MCP_PORT" =~ ^[0-9]+$ ]] && (( MCP_PORT >= 1024 && MCP_PORT <= 65535 )) \
-    || die "MCP_PORT must be a port from 1024 to 65535"
+if [[ ! "$MCP_PORT" =~ ^[0-9]+$ ]] || (( MCP_PORT < 1024 || MCP_PORT > 65535 )); then
+    die "MCP_PORT must be a port from 1024 to 65535"
+fi
 [[ "${EXPECTED_STATIC_IP:-}" =~ $ipv4_re ]] || die "EXPECTED_STATIC_IP must be the Reserved IPv4 address"
 [[ "$EXPECTED_STATIC_IP" != "203.0.113.10" ]] || die "EXPECTED_STATIC_IP is still the placeholder"
 if [[ -n "$ADMIN_SSH_FROM_IP" ]]; then
@@ -262,10 +269,10 @@ fetch_release() {
 
 build_from_source() {
     [[ "$KITE_MCP_COMMIT" =~ ^[0-9a-f]{40}$ ]] || die "the source fallback needs KITE_MCP_COMMIT (40 hex digits)"
-    local sum_var="GO_SHA256_$ARCH" tarball="$GO_VERSION.linux-$ARCH.tar.gz"
+    local tarball="$GO_VERSION.linux-$ARCH.tar.gz"
     note "no release binary for linux-$ARCH: building $KITE_MCP_VERSION with $GO_VERSION"
     curl -fsSL --retry 3 -o "$TMP/$tarball" "https://go.dev/dl/$tarball"
-    printf '%s  %s\n' "${!sum_var}" "$TMP/$tarball" | sha256sum -c --status || die "SHA-256 mismatch for $tarball"
+    printf '%s  %s\n' "$(go_sha256 "$ARCH")" "$TMP/$tarball" | sha256sum -c --status || die "SHA-256 mismatch for $tarball"
     tar -C "$TMP" -xzf "$TMP/$tarball"
     git -c advice.detachedHead=false clone -q --depth 1 --branch "$KITE_MCP_VERSION" \
         https://github.com/zerodha/kite-mcp-server "$TMP/src"
