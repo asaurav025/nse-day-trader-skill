@@ -3,7 +3,7 @@ name: trader-risk
 description: >-
   Risk Manager. Checks every trade against your limits (in rupees) and stops
   anything over them, before it can reach the broker. For an intraday trade:
-  a stop is required, the loss at the stop must fit your max loss per trade
+  a stop is required, the loss at the SL's limit must fit your max loss per trade
   (measured from the higher of the plan's entry and a fresh price), reward:risk
   must meet your minimum, the day's total risk must fit your daily loss limit,
   no more than your trades per day, and no new entries outside your entry
@@ -61,17 +61,17 @@ batch that is fine order by order but breaks a limit together is caught.
 
 | check | blocks when |
 | --- | --- |
-| format | no symbol, side not buy or sell, both or neither of qty and notional, a qty that is not whole shares, a price that is not a multiple of the ₹0.05 tick, a notional order that is not market + day, a limit order with no limit price; a bracket that is not `day` or `gtc`, or misses its stop-loss or take-profit |
+| format | no symbol, side not buy or sell, a qty that is not whole shares, an `order_type` other than LIMIT (Kite takes no API MARKET or SL-M order without market protection, which kite-mcp-server v0.3.2 cannot send), no limit `price`, a price / `stop` / `stop_limit` / `target` off the ₹0.05 tick, a product other than MIS (or CNC) |
 | asset | an F&O contract (`NIFTY26OCTFUT`, `...24500CE`): out of scope; anything that is not an NSE equity symbol (`RELIANCE`, `M&M`, `BAJAJ-AUTO`; `.NS` is accepted and dropped) |
 | short | a sell of more than you hold (`allow_short` false) |
 | blocked | (entries) the symbol is on the `blocked` list |
 | size | (entries) under `min_order_inr` or over `max_order_inr` |
 | position | (entries) the stock would be over `max_position_pct` of the account |
 | cash | (entries) the buy would leave less than the cash buffer, or need margin |
-| stop | (entries) no stop while `require_stop` is true (the order's stop-loss, or its plan stop); a stop on the wrong side of the entry |
-| loss | (entries) qty x (entry minus stop) over `max_loss_per_trade_inr` |
-| reward:risk | (entries) (target minus entry) / (entry minus stop) under `min_reward_risk` |
-| daily loss | (entries) the max losses at the stops of today's entries, plus this one, over `max_daily_loss_inr` |
+| stop | (entries) no `stop` (the SL leg's trigger) while `require_stop` is true, no `stop_limit` for the SL, a stop on the wrong side of the limit, or an SL limit not under its trigger |
+| loss | (entries) qty x (limit price minus SL limit) over `max_loss_per_trade_inr`: the worst entry fill and the worst stop fill |
+| reward:risk | (entries) (target minus limit) / (limit minus stop) under `min_reward_risk` |
+| daily loss | (entries) the max losses of today's entries (dry-run rehearsals included), plus this one, over `max_daily_loss_inr` |
 | trades | (entries) `max_trades_per_day` entries already placed today |
 | window | (entries) before `no_entries_before` or after `no_entries_after`, or the NSE is closed |
 | duplicate | (entries) the same symbol and side twice in one batch, or already placed today |
@@ -125,34 +125,34 @@ not at the broker, a price too old to use, an ignored config key.
 ## Example: the reel
 
 The RELIANCE order from trader-budget at 10:15 AM on Thursday 2026-10-29, on a
-fresh ₹1,00,000 account with the example config:
+fresh ₹1,00,000 account with the example config (real 2026-10-29 bars; plan
+from trader-exit: entry 1,174.30, opening-range-mid stop 1,163.35, 2R target 1,196.20):
 
 ```
-PASS  #1 buy RELIANCE 63 shares, entry
-          entry 1174.30 (the plan's entry), stop 1166.20, target 1190.50: risk 8.10 a share
-          max loss ₹510.30 (limit ₹1,000), reward:risk 2.00 (min 1)
+PASS  #1 buy RELIANCE 49 shares, entry
+          limit 1177.85, SL trigger 1163.35 limit 1157.50, target 1196.20: risk 20.35 a share to the SL limit
+          max loss ₹997.15 (limit ₹1,000), reward:risk 1.27 (min 1)
           today before this: 0 of 3 trades, ₹0 of ₹3,000 daily loss
 
-1 passed, 0 blocked at 2026-10-29 10:15 IST. Cash after the passed orders: ₹26,019.10 (paper account).
+1 passed, 0 blocked at 2026-10-29 10:15 IST. Cash after the passed orders: ₹42,285.35 (dry run: nothing goes to Zerodha).
 ```
 
-One more share and it is blocked:
+The risk is measured from the LIMIT (the worst entry fill) to the SL's limit
+(the worst stop fill): 1,177.85 - 1,157.50 = 20.35 a share. One more share and
+it is blocked:
 
 ```
-BLOCK #1 buy RELIANCE 64 shares, entry
-          entry 1174.30 (the plan's entry), stop 1166.20, target 1190.50: risk 8.10 a share
-          max loss ₹518.40 (limit ₹1,000), reward:risk 2.00 (min 1)
+BLOCK #1 buy RELIANCE 50 shares, entry
+          limit 1177.85, SL trigger 1163.35 limit 1157.50, target 1196.20: risk 20.35 a share to the SL limit
+          max loss ₹1,017.50 (limit ₹1,000), reward:risk 1.27 (min 1)
           today before this: 0 of 3 trades, ₹0 of ₹3,000 daily loss
-        - size: ₹75,155.20 is over your ₹75,000 max order
-        - position: RELIANCE would be ₹75,155.20, 75.2% of the ₹1,00,000 account, over your 75% cap
+        - loss: 50 shares x 20.35 risk a share = ₹1,017.50 if the SL fills at 1157.50, over your ₹1,000 max loss per trade
 ```
 
-The same 63 shares checked at 10:55 with a fresh price of 1,180.40 in
-`trader/prices.json` are blocked: the risk is measured from 1,180.40 (14.20 a
-share, ₹894.60 at the stop) and reward:risk falls to 0.71. At 9:20 they are
-blocked by the window (no new entries before 09:30). The 15:10 sell that
-closes the position passes, even though it is after the 14:45 entry cutoff:
-it is an exit.
+A MARKET order is blocked by format (Kite would reject it without market
+protection). At 9:20 the order is blocked by the window (no new entries before
+09:30). The 15:10 exit that closes the position passes, even though it is after
+the 14:45 entry cutoff: it is an exit.
 
 ## Rules
 
@@ -170,7 +170,8 @@ treats a PASS as the user's yes.
 ## Safety
 
 - Education and tooling, not financial advice. A PASS is a rules check, not a recommendation.
-- Paper trading by default (`"paper": true`). Going live is the user's own decision, in their own config.
+- Dry run by default (`"dry_run": true`): Zerodha has no paper account, so trader-broker renders and logs
+  every ticket and Claude calls no order tool. Going live is the user's own edit of their own config.
 - Nothing in this pack places an order except trader-broker, and only when all three hold: trader-risk
   passed that exact order today, the user typed an explicit yes for that one order in the chat, and the
   user clicked Allow once on Claude's own card because the order tool is set to "Needs approval"

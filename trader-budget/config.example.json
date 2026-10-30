@@ -13,9 +13,13 @@
   "no_entries_before": "09:30",
   "no_entries_after": "14:45",
   "flat_by": "15:10",
-  "broker": "alpaca",
-  "paper": true,
+  "product": "MIS",
+  "entry_limit_buffer_pct": 0.3,
+  "stop_limit_buffer_pct": 0.5,
+  "exit_limit_buffer_pct": 0.5,
+  "broker": "zerodha",
   "blocked": [],
   "allow_margin": false,
-  "allow_short": false
+  "allow_short": false,
+  "dry_run": true
 }

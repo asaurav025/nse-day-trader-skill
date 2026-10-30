@@ -135,7 +135,8 @@ watch: nobody is there to say yes.
 ## Safety
 
 - Education and tooling, not financial advice. A PASS is a rules check, not a recommendation.
-- Paper trading by default (`"paper": true`). Going live is the user's own decision, in their own config.
+- Dry run by default (`"dry_run": true`): Zerodha has no paper account, so trader-broker renders and logs
+  every ticket and Claude calls no order tool. Going live is the user's own edit of their own config.
 - Nothing in this pack places an order except trader-broker, and only when all three hold: trader-risk
   passed that exact order today, the user typed an explicit yes for that one order in the chat, and the
   user clicked Allow once on Claude's own card because the order tool is set to "Needs approval"

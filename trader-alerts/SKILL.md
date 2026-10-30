@@ -24,11 +24,13 @@ chart. An alert is information, never an order: when an alert rings, nothing
 is bought or sold by this skill.
 
 On Zerodha there are no bracket orders. After the entry fills, only the
-protective **SL-M stop** rests at the broker and does the stopping. The
-**take-profit is an alert, not a resting order**: when the target alert rings,
-the user sells through trader-broker (`flatten`: cancel the open SL-M, then a
-MARKET sell, after trader-risk and the user's yes). The flat-by alert does the
-same before Zerodha's MIS auto square-off, which starts around 15:20.
+protective **SL stop** rests at the broker and does the stopping: it triggers at
+the stop and sells no lower than its limit, so a gap through the limit leaves it
+triggered but unfilled. The **take-profit is an alert, not a resting order**:
+when the target alert rings, the user sells through trader-broker (`flatten`:
+cancel the open SL, then a LIMIT sell just under the last price, after
+trader-risk and the user's yes). The flat-by alert does the same before
+Zerodha's MIS auto square-off, which starts around 15:20.
 
 `${CLAUDE_SKILL_DIR}` below is this skill's folder (where this SKILL.md lives).
 
@@ -114,10 +116,12 @@ list is unknown. Special weekend sessions (Muhurat trading) are not modelled.
    rules and rings each alert once. A check reads the latest delayed quote;
    it is not a live feed, and a price can pass a level between two checks.
 3. Tell the user what rang, in one line each:
-   - **stop**: the SL-M at Zerodha has probably triggered. Check `get_orders` /
-     `get_positions` (read only) and record the fill with trader-broker (`ticket.py fill`).
+   - **stop**: the SL at Zerodha has probably triggered. Check `get_orders` /
+     `get_positions` (read only). Filled: record it (`ticket.py fill ... --closes <SL order id>`).
+     Still open with the price under its limit: the stop did NOT fill, and the
+     position is unprotected; say so plainly and offer `flatten` at once.
    - **target**: nothing rests at the target. If the user wants to take it:
-     trader-broker `flatten` (cancel the SL-M, then a MARKET sell), then
+     trader-broker `flatten` (cancel the SL, then a LIMIT sell), then
      trader-risk, then the user's yes.
    - **flat by close**: close anything still open the same way, before the MIS
      auto square-off.

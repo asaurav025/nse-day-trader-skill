@@ -21,8 +21,9 @@ Symbols are bare NSE trading symbols (RELIANCE, M&M, BAJAJ-AUTO); a trailing
 Rule types:
   above / target  the price is at or above "price". On Zerodha the take-profit is
                   this alert, not a resting order: when it rings, you sell.
-  below / stop    the price is at or below "price" (the SL-M stop at the broker
-                  is what actually stops you out; this alert tells you it is near)
+  below / stop    the price is at or below "price" (the SL stop at the broker
+                  is what actually stops you out; this alert tells you it is near,
+                  or that it may have triggered without filling)
   pct_move        the price moved "pct" percent or more from the previous close
                   (or from "ref" if you give one); "direction": "up" or "down"
   opening_bell    the NSE opened today (rings once per trading day)
@@ -525,10 +526,11 @@ def cmd_check(a):
         for e in errors:
             print("error: " + e)
         if rings:
-            print("An alert is information, not an order. On Zerodha only the SL-M stop rests at the broker; "
+            print("An alert is information, not an order. On Zerodha only the SL stop rests at the broker; "
                   "the target is this alert. Check get_positions / get_orders and record any fill (ticket.py "
-                  "fill). To sell at the target or by flat-by: ticket.py flatten (it cancels the open SL-M, then "
-                  "a MARKET sell), then trader-risk and your yes.")
+                  "fill). An SL still open with the price under its limit did not fill: the position has no "
+                  "stop. To sell at the target or by flat-by: ticket.py flatten (it cancels the open SL, then "
+                  "a LIMIT sell), then trader-risk and your yes.")
     return 0 if rings else 1
 
 
@@ -552,7 +554,7 @@ def cmd_add(a):
         for r in new:
             print("Added %s: %s" % (r["id"], json.dumps(r)))
         print("Run alerts.py check every few minutes while the trade is open (a scheduled task or /loop). "
-              "Free quotes are delayed. The SL-M stop at Zerodha is what actually stops you out; the target "
+              "Free quotes are delayed. The SL stop at Zerodha is what actually stops you out; the target "
               "rests nowhere, so when it rings you sell (flatten, trader-risk, your yes).")
         return 0
     if a.opening_bell:

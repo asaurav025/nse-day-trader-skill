@@ -6,8 +6,8 @@ description: >-
   target), rounds every price to the NSE tick of ₹0.05, finds the whole shares
   that fit inside four limits (max loss per trade, position cap, max order,
   cash after your buffer), says which limit decided it, and writes ONE
-  proposed order (entry, stop-loss, take-profit) to trader/orders.json for
-  trader-broker's ticket. A stop too far away for your max loss is a plain
+  proposed Zerodha order to trader/orders.json for trader-broker's two-leg
+  ticket: a LIMIT buy, the SL stop that follows it, and the target as an alert. A stop too far away for your max loss is a plain
   refusal, not a smaller order. Nothing is placed. Use when the user says "how
   many shares", "size this trade", "how much should I buy", "I have
   ₹1,00,000", "I only want to risk ₹1,000 a trade", "set my rules", "keep 10%
@@ -17,8 +17,9 @@ argument-hint: "[budget in rupees]"
 
 # trader-budget
 
-The Budget Manager turns a plan ("buy RELIANCE at 1,174.30, stop 1,166.20")
-into an exact order ("buy 63 shares"), inside rules the user sets once. The
+The Budget Manager turns a plan ("buy RELIANCE at 1,174.30, stop 1,163.35")
+into an exact order ("buy 49 shares, LIMIT 1,177.85, SL 1,163.35 / 1,157.50"),
+inside rules the user sets once. The
 stop decides the size: the further away the stop, the fewer shares. It writes
 a proposal only. trader-risk checks it and trader-broker asks the user yes or
 no. Intraday trading loses most people money. Sizing to a max loss keeps each
@@ -98,35 +99,49 @@ plan is a short. Say the reason to the user in one line.
 ## Step 3: show the user
 
 Show the four limits, which one decided the size, the shares, the rupees and
-the max loss at the stop. Say plainly that a stop is an order, not a promise:
-in a fast market it can fill below the stop, and a stock locked at its circuit
-limit may not trade at all. Then hand over to `/trader-risk`.
+the max loss at the SL's limit. Say plainly that a stop is an order, not a
+promise: a gap below the SL's limit leaves it triggered but unfilled, and a
+stock locked at its circuit limit may not trade at all. Then hand over to `/trader-risk`.
 
 ## Example: the reel
 
-RELIANCE on Thursday 2026-10-29. Opening-range breakout: entry 1,174.30 at
-9:40 AM, stop 1,166.20, target 1,190.50 (2R). Risk 8.10 a share. The example
-config: ₹1,00,000 budget, 10% cash buffer, ₹1,000 max loss.
+RELIANCE on Thursday 2026-10-29 (real bars). Opening-range breakout from
+trader-exit: entry 1,174.30 at 9:40 AM, stop 1,163.35 (the range's midpoint),
+target 1,196.20 (2R). The example config: ₹1,00,000 budget, 10% cash buffer,
+₹1,000 max loss, entry buffer 0.3%, SL buffer 0.5%.
+
+- Limit: 1,174.30 + 0.3% = 1,177.82, up to the tick: **1,177.85**.
+- SL: trigger 1,163.35, limit 1,163.35 - 0.5% = 1,157.53, down to the tick: **1,157.50**.
+- Risk 1,177.85 - 1,157.50 = **20.35** a share (14.50 to the trigger). Reward:risk
+  (1,196.20 - 1,177.85) / 14.50 = 1.27.
 
 | limit | the math | shares |
 | --- | --- | --- |
-| max loss | ₹1,000 / 8.10 | 123 |
-| position cap | 75% of ₹1,00,000 = ₹75,000 / 1,174.30 | **63 (decides it)** |
-| max order | ₹75,000 / 1,174.30 | 63 |
-| cash | ₹1,00,000 minus ₹10,000 = ₹90,000 / 1,174.30 | 76 |
+| max loss | ₹1,000 / 20.35 | **49 (decides it)** |
+| position cap | 75% of ₹1,00,000 = ₹75,000 / 1,177.85 | 63 |
+| max order | ₹75,000 / 1,177.85 | 63 |
+| cash | ₹1,00,000 minus ₹10,000 = ₹90,000 / 1,177.85 | 76 |
 
-63 shares = ₹73,980.90. Max loss at the stop: 63 x 8.10 = ₹510.30. It writes
-one proposed order with the entry, the stop-loss (1166.20) and the take-profit
-(1190.50), a `why` ("opening-range breakout on RELIANCE: 63 shares, bound by
-your position cap (63 x 8.10 = ₹510.30 at the stop)") and the `plan`.
-trader-broker turns it into the order ticket; `why` and `plan` are notes for
-trader-risk and trader-broker and are never sent to the broker.
+49 shares = ₹57,714.65. Max loss ₹997.15 if the SL fills at its limit (₹710.50
+at the trigger). It writes one proposed order:
 
-With the stop at 1,160.00 instead, the risk is 14.30 a share and the max loss
-69 shares, so the position cap still decides at 63 (₹900.90 at the stop). If
-the price has run to 1,180.40 by 10:55, the same plan is measured from there:
-risk 14.20 a share and reward:risk 0.71, refused, because the move it was
-waiting for has mostly happened.
+```
+leg 1  BUY 49 RELIANCE, LIMIT 1177.85, MIS, day
+leg 2  after it fills: SELL those shares, SL trigger 1163.35 limit 1157.50, MIS, day
+target 1196.20: an alert, not an order (when it rings: trader-broker flatten)
+```
+
+with a `why` ("opening-range breakout on RELIANCE: 49 shares, bound by your
+₹1,000 max loss per trade (49 x 20.35 = ₹997.15 if the SL fills at its limit
+1157.50)") and the `plan`. trader-broker turns it into the two-leg ticket; `why`
+and `plan` are notes for trader-risk and trader-broker and are never sent to
+the broker.
+
+The buffers cost shares: sized at the plan's own prices (entry 1,174.30, stop
+1,163.35, risk 10.95) the position cap would have allowed 63. That is the price
+of a LIMIT entry that cannot chase and an SL that cannot sell at any price. Set
+`entry_limit_buffer_pct` / `stop_limit_buffer_pct` in trader/config.json to
+change them (0 to 5).
 
 ## Weights mode (kept from v1)
 
@@ -136,7 +151,7 @@ by weight: the cash buffer comes off the top, weights are renormalised to 100,
 any stock over `max_position_pct` is pinned at the cap and its excess shared
 out, slices under the minimum order are dropped, and each slice is bought in
 whole shares, so it needs a price for every symbol (`--prices
-trader/prices.json`). These are plain buys with no stop: trader-risk blocks them
+trader/prices.json`). These are LIMIT buys (product CNC, delivery) with no stop: trader-risk blocks them
 while `require_stop` is true and counts each one against `max_trades_per_day`.
 Use a separate config (`--config`) for a long-term split.
 
@@ -157,7 +172,8 @@ short positions.
 ## Safety
 
 - Education and tooling, not financial advice. A PASS is a rules check, not a recommendation.
-- Paper trading by default (`"paper": true`). Going live is the user's own decision, in their own config.
+- Dry run by default (`"dry_run": true`): Zerodha has no paper account, so trader-broker renders and logs
+  every ticket and Claude calls no order tool. Going live is the user's own edit of their own config.
 - Nothing in this pack places an order except trader-broker, and only when all three hold: trader-risk
   passed that exact order today, the user typed an explicit yes for that one order in the chat, and the
   user clicked Allow once on Claude's own card because the order tool is set to "Needs approval"

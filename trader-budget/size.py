@@ -3,35 +3,42 @@
 
 Default mode: sizes ONE day trade from trader/plan.json (written by
 trader-exit) to your budget and your max loss per trade, then writes one
-proposed order (entry, stop-loss, take-profit) to trader/orders.json for
-trader-broker's ticket. It never places anything: trader-risk checks the
-order and trader-broker asks you yes or no.
+proposed Zerodha order to trader/orders.json for trader-broker's ticket: a
+LIMIT buy (leg 1), the SL stop that follows it (leg 2) and the target (an
+alert, not an order). It never places anything: trader-risk checks the order
+and trader-broker asks you yes or no.
 
     python3 size.py                                  # trader/plan.json + trader/config.json
     python3 size.py --write                          # write trader/orders.json
-    python3 size.py --limit                          # a limit order at the plan's entry
-    python3 size.py --limit 1174.30 --write          # a limit order at 1174.30
+    python3 size.py --limit 1176.00 --write          # your own limit price
     python3 size.py --now "2026-10-29 10:15" --json  # pin the clock (IST)
+
+The two prices it adds (trader_common/orders.py has the reasons):
+  limit      the entry is a LIMIT buy entry_limit_buffer_pct (0.3) above the
+             plan's entry (or a fresh, higher price), up to the tick: it fills
+             like a market order unless the price has run away, and then it
+             rests unfilled instead of chasing. --limit PRICE sets it yourself.
+  stop_limit the stop is an SL order: it triggers at the plan's stop and sells
+             no lower than stop_limit_buffer_pct (0.5) under it, down to the
+             tick. A gap below stop_limit leaves it unfilled (trader-alerts warns).
+Kite takes no MARKET or SL-M order over the API without market protection, which
+the kite-mcp-server release this pack targets cannot send; hence LIMIT and SL.
 
 How many shares. Whole shares only: NSE equity has no fractional shares.
 
     shares = floor of the smallest of
-      max loss       max_loss_per_trade_inr / risk per share (entry minus stop)
-      position cap   budget x max_position_pct / entry
-      max order      max_order_inr / entry
-      cash           (budget minus the cash buffer) / entry
+      max loss       max_loss_per_trade_inr / (limit - stop_limit): the worst entry fill
+                     and the worst stop fill
+      position cap   budget x max_position_pct / limit
+      max order      max_order_inr / limit
+      cash           (budget minus the cash buffer) / limit
                      (and no more than the cash in trader/portfolio.json, if you have one)
 
 Money is in rupees: every limit key ends in _inr, and a config that still has
-an _usd key is refused. Every price (entry, stop, target, limit) is rounded to
-the NSE tick of 0.05 first, and the risk math uses those rounded prices.
-
-The entry it sizes at: a limit order's limit price; for a market order the
-plan's entry, or the price in trader/prices.json if that is fresh (under 15
-minutes old) and higher, because a price that ran up since the plan means a
-bigger loss at the same stop. Zero shares (the stop is too far away for your
-max loss) is a plain refusal: no order is written. So is a reward:risk under
-min_reward_risk (the price ran toward the target since the plan).
+an _usd key is refused. Every price is on the NSE tick of 0.05, and the risk
+math uses those prices. Reward:risk is the plan's: (target - limit) / (limit - stop).
+Zero shares (the stop is too far away for your max loss) is a plain refusal:
+no order is written. So is a reward:risk under min_reward_risk.
 
 Weights mode (kept from v1, no longer the headline): split a budget across a
 list of NSE stocks by weight, in whole shares (it needs a price for each).
@@ -61,7 +68,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from trader_common import clock, money as rupees, symbols as nse  # noqa: E402
+from trader_common import clock, money as rupees, orders as kite, symbols as nse  # noqa: E402
 
 # The defaults of config.example.json (rupees). Missing keys fall back to these.
 DEFAULTS = {
@@ -79,7 +86,12 @@ DEFAULTS = {
     "no_entries_before": clock.hm(clock.NO_ENTRIES_BEFORE),
     "no_entries_after": clock.hm(clock.NO_ENTRIES_AFTER),
     "flat_by": clock.hm(clock.FLAT_BY),
-    "paper": True,
+    "broker": "zerodha",
+    "dry_run": True,
+    "product": "MIS",
+    "entry_limit_buffer_pct": kite.DEFAULT_BUFFERS["entry_limit_buffer_pct"],
+    "stop_limit_buffer_pct": kite.DEFAULT_BUFFERS["stop_limit_buffer_pct"],
+    "exit_limit_buffer_pct": kite.DEFAULT_BUFFERS["exit_limit_buffer_pct"],
     "blocked": [],
     "allow_margin": False,
     "allow_short": False,
@@ -88,6 +100,7 @@ DROPPED_KEYS = {
     "pdt_guard": "pdt_guard is a US (FINRA) rule with no NSE equivalent: ignored.",
     "fractional": "fractional is ignored: NSE equity trades whole shares only.",
     "allow_options": "allow_options is ignored: F&O is out of scope for this pack.",
+    "paper": "paper is ignored: Zerodha has no paper account; use \"dry_run\": true (the default).",
 }
 EPS = 1e-9
 FRESH_MINUTES = 15
@@ -303,8 +316,9 @@ def money(x):
 def size_trade(plan, cfg, budget=None, limit=None, price=None, cash=None, today=None):
     """Pure function: one plan + your rules -> the sizing (a dict). qty may be 0.
 
-    limit  the limit price for a limit order (None = market)
-    price  a FRESH latest price; a market order is sized at the higher of it and the plan's entry
+    limit  your own limit price (None = the plan's entry, or a fresh higher price, plus
+           entry_limit_buffer_pct)
+    price  a FRESH latest price
     cash   the cash in trader/portfolio.json, if there is one
     today  IST date (YYYY-MM-DD); a plan for another day is refused"""
     user, _ = config_units(cfg)
@@ -324,8 +338,8 @@ def size_trade(plan, cfg, budget=None, limit=None, price=None, cash=None, today=
     entry_plan, stop, target = _f(plan.get("entry")), _f(plan.get("stop")), _f(plan.get("target"))
     for name, v in (("entry", entry_plan), ("stop", stop), ("target", target)):
         if v is None or v <= 0:
-            raise SizeError("the plan needs a positive %s (run trader-exit); a bracket order needs entry, "
-                            "stop and target" % name)
+            raise SizeError("the plan needs a positive %s (run trader-exit): every trade needs an entry, "
+                            "a stop and a target" % name)
     blocked = {nse.normalize(b) or str(b).upper() for b in (c.get("blocked") or [])}
     if sym in blocked:
         raise SizeError("%s is on your blocked list" % sym)
@@ -337,20 +351,35 @@ def size_trade(plan, cfg, budget=None, limit=None, price=None, cash=None, today=
     if not 0 <= buf_pct < 100:
         raise SizeError("cash_buffer_pct must be between 0 and 100")
 
+    try:
+        entry_buf = kite.buffer_pct(c, "entry_limit_buffer_pct")
+        stop_buf = kite.buffer_pct(c, "stop_limit_buffer_pct")
+    except ValueError as e:
+        raise SizeError(str(e))
+    product = str(c.get("product") or "MIS").upper()
+    if product != "MIS":
+        raise SizeError("a day trade is product MIS (intraday), not %r" % product)
     if limit is not None:
-        ref, ref_from = round_tick(limit), "limit"
-    elif price is not None and round_tick(price) > round_tick(entry_plan):
-        ref, ref_from = round_tick(price), "price"
+        base, ref_from = round_tick(limit), "limit"
+        ref = base
     else:
-        ref, ref_from = round_tick(entry_plan), "plan"
+        if price is not None and round_tick(price) > round_tick(entry_plan):
+            base, ref_from = round_tick(price), "price"
+        else:
+            base, ref_from = round_tick(entry_plan), "plan"
+        ref = kite.limit_above(base, entry_buf)
     stop, target = round_tick(stop), round_tick(target)
     if stop >= ref:
         raise SizeError("the stop %s is not below the entry %s; a long trade needs its stop underneath"
                         % (_price(stop), _price(ref)))
     if target <= ref:
-        raise SizeError("the target %s is not above the entry %s: the move has already happened. "
+        raise SizeError("the target %s is not above the limit %s: the move has already happened. "
                         "Skip it or make a new plan with trader-exit" % (_price(target), _price(ref)))
-    risk_c = int(round((ref - stop) * 100))
+    stop_limit = kite.limit_below(stop, stop_buf)
+    if stop_limit >= stop:
+        stop_limit = round_tick(stop - rupees.TICK)
+    risk_c = int(round((ref - stop_limit) * 100))       # what the limits are held to
+    risk_stop_c = int(round((ref - stop) * 100))         # the plan's R
     reward_c = int(round((target - ref) * 100))
     risk = risk_c / 100.0
 
@@ -394,51 +423,50 @@ def size_trade(plan, cfg, budget=None, limit=None, price=None, cash=None, today=
         else:
             refusal = ("one share of %s costs %s, more than your %s limit (%s). No order."
                        % (sym, money(ref), bound[0], limits[[l["name"] for l in limits].index(bound[0])]["how"]))
-    elif _f(c.get("min_reward_risk")) and reward_c < _f(c["min_reward_risk"]) * risk_c - EPS:
-        refusal = ("reward:risk %.2f (target %s, entry %s, stop %s) is under your minimum %s, so trader-risk "
+    elif _f(c.get("min_reward_risk")) and reward_c < _f(c["min_reward_risk"]) * risk_stop_c - EPS:
+        refusal = ("reward:risk %.2f (target %s, limit %s, stop %s) is under your minimum %s, so trader-risk "
                    "would block it. No order. Skip it, or make a new plan with trader-exit."
-                   % (reward_c / float(risk_c), _price(target), _price(ref), _price(stop), _num(c["min_reward_risk"])))
+                   % (reward_c / float(risk_stop_c), _price(target), _price(ref), _price(stop),
+                      _num(c["min_reward_risk"])))
     elif cost < float(c.get("min_order_inr") or 0) - 0.005:
         refusal = ("%d share%s of %s is %s, under your %s minimum order. No order."
                    % (qty, "" if qty == 1 else "s", sym, money(cost), money(c["min_order_inr"])))
     return {
         "symbol": sym, "side": "buy", "setup": plan.get("setup", ""), "date": plan.get("date"),
         "entry_time": plan.get("entry_time", ""), "entry_plan": round_tick(entry_plan),
-        "entry": ref, "entry_from": ref_from, "stop": stop, "target": target,
-        "risk_per_share": risk, "reward_risk": round(reward_c / float(risk_c), 2),
+        "entry": ref, "entry_base": base, "entry_from": ref_from, "entry_limit_buffer_pct": entry_buf,
+        "stop": stop, "stop_limit": stop_limit, "stop_limit_buffer_pct": stop_buf, "target": target,
+        "risk_per_share": risk, "risk_per_share_at_stop": risk_stop_c / 100.0,
+        "max_loss_at_stop": round(qty * risk_stop_c / 100.0, 2),
+        "reward_risk": round(reward_c / float(risk_stop_c), 2), "product": product,
         "stop_label": plan.get("stop_label", ""), "target_label": plan.get("target_label", ""),
         "budget": budget, "cash_buffer_pct": buf_pct, "cash_buffer": cash_buffer, "cash_available": available,
         "max_loss_per_trade_inr": max_loss, "limits": limits, "qty": qty, "bound_by": bound[0],
         "cost": cost, "max_loss": loss, "flat_by": plan.get("flat_by") or c.get("flat_by"),
-        "order_type": "limit" if limit is not None else "market", "refusal": refusal,
+        "refusal": refusal,
     }
 
 
-def bracket_order(s):
-    """The one proposed order (entry, stop-loss and take-profit legs as strings) plus why and plan.
-    trader-broker turns it into its ticket."""
+def kite_order(s):
+    """The one proposed order (trader_common/orders.py shape) plus why and plan.
+    trader-broker turns it into its two-leg ticket."""
     if s["refusal"] or s["qty"] <= 0:
         return None
-    o = {"symbol": s["symbol"], "side": "buy", "qty": str(int(s["qty"])), "type": s["order_type"],
-         "time_in_force": "day"}
-    if s["order_type"] == "limit":
-        o["limit_price"] = _price(s["entry"])
     setup = SETUP_WORDS.get(s["setup"], s["setup"] or "day trade")
-    why = ("%s on %s: %d shares, bound by your %s (%d x %s = %s at the stop)"
+    why = ("%s on %s: %d shares, bound by your %s (%d x %s = %s if the SL fills at its limit %s)"
            % (setup, s["symbol"], s["qty"], {"max loss": "%s max loss per trade" % money(s["max_loss_per_trade_inr"] or 0),
                                              "position cap": "position cap", "max order": "max order",
                                              "cash": "cash after the buffer"}[s["bound_by"]],
-              s["qty"], _price(s["risk_per_share"]), money(s["max_loss"])))
-    o.update({
-        "order_class": "bracket",
-        "take_profit_limit_price": _price(s["target"]),
-        "stop_loss_stop_price": _price(s["stop"]),
-        "why": why,
-        "plan": {"entry": s["entry"], "stop": s["stop"], "target": s["target"],
-                 "risk_per_share": s["risk_per_share"], "max_loss": s["max_loss"], "setup": s["setup"],
-                 "entry_time": s["entry_time"], "flat_by": s["flat_by"]},
-    })
-    return o
+              s["qty"], _price(s["risk_per_share"]), money(s["max_loss"]), _price(s["stop_limit"])))
+    return {
+        "symbol": s["symbol"], "side": "buy", "qty": int(s["qty"]), "order_type": "LIMIT",
+        "price": s["entry"], "product": s["product"], "stop": s["stop"], "stop_limit": s["stop_limit"],
+        "target": s["target"], "why": why,
+        "plan": {"entry": s["entry_plan"], "limit": s["entry"], "stop": s["stop"], "stop_limit": s["stop_limit"],
+                 "target": s["target"], "risk_per_share": s["risk_per_share"], "max_loss": s["max_loss"],
+                 "max_loss_at_stop": s["max_loss_at_stop"], "setup": s["setup"], "entry_time": s["entry_time"],
+                 "flat_by": s["flat_by"]},
+    }
 
 
 def plan_report(s, order, notes=()):
@@ -451,11 +479,18 @@ def plan_report(s, order, notes=()):
                                              (": " + s["target_label"]) if s["target_label"] else ""))
     for n in notes:
         lines.append(n)
-    src = {"plan": "the plan's entry", "price": "the latest price, above the plan's entry",
-           "limit": "your limit price"}[s["entry_from"]]
-    lines.append("Sized at %s (%s). Risk %s a share (entry %s minus stop %s). Reward:risk %.2f."
-                 % (_price(s["entry"]), src, _price(s["risk_per_share"]), _price(s["entry"]), _price(s["stop"]),
-                    s["reward_risk"]))
+    if s["entry_from"] == "limit":
+        lines.append("Limit %s (your price)." % _price(s["entry"]))
+    else:
+        src = {"plan": "the plan's entry", "price": "the latest price, above the plan's entry"}[s["entry_from"]]
+        lines.append("Limit %s: %s %s plus %s%%, up to the tick (fills like a market order unless the price "
+                     "has run away)." % (_price(s["entry"]), src, _price(s["entry_base"]),
+                                         _num(s["entry_limit_buffer_pct"])))
+    lines.append("SL stop: triggers at %s, sells no lower than %s (%s%% under, down to the tick)."
+                 % (_price(s["stop"]), _price(s["stop_limit"]), _num(s["stop_limit_buffer_pct"])))
+    lines.append("Risk %s a share (limit %s minus SL limit %s); %s to the trigger. Reward:risk %.2f."
+                 % (_price(s["risk_per_share"]), _price(s["entry"]), _price(s["stop_limit"]),
+                    _price(s["risk_per_share_at_stop"]), s["reward_risk"]))
     lines.append("")
     lines.append("Limits (whole shares; the smallest one wins):")
     for l in s["limits"]:
@@ -466,16 +501,18 @@ def plan_report(s, order, notes=()):
         lines.append("No order: " + s["refusal"])
         lines.append("Education and tooling, not financial advice.")
         return "\n".join(lines)
-    lines.append("Size: %d shares of %s = %s at %s. Max loss at the stop: %d x %s = %s."
-                 % (s["qty"], s["symbol"], money(s["cost"]), _price(s["entry"]), s["qty"],
-                    _price(s["risk_per_share"]), money(s["max_loss"])))
-    lines.append("A stop is an order, not a promise: in a fast market it can fill below %s." % _price(s["stop"]))
+    lines.append("Size: %d shares of %s = %s at %s. Max loss: %s if the SL fills at its limit %s (%s at the "
+                 "trigger %s)." % (s["qty"], s["symbol"], money(s["cost"]), _price(s["entry"]), money(s["max_loss"]),
+                                   _price(s["stop_limit"]), money(s["max_loss_at_stop"]), _price(s["stop"])))
+    lines.append("A stop is an order, not a promise: a gap below %s leaves the SL triggered but unfilled."
+                 % _price(s["stop_limit"]))
     lines.append("")
-    lines.append("Proposed order (entry, stop-loss, take-profit; nothing has been placed):")
-    how = "limit %s" % order["limit_price"] if order["type"] == "limit" else "market"
-    lines.append("  buy %s %s, %s, day, take-profit %s, stop-loss %s"
-                 % (order["qty"], order["symbol"], how, order["take_profit_limit_price"],
-                    order["stop_loss_stop_price"]))
+    lines.append("Proposed order (nothing has been placed):")
+    lines.append("  leg 1  BUY %d %s, LIMIT %s, %s, day" % (order["qty"], order["symbol"], _price(order["price"]),
+                                                         order["product"]))
+    lines.append("  leg 2  after it fills: SELL those shares, SL trigger %s limit %s, %s, day"
+                 % (_price(order["stop"]), _price(order["stop_limit"]), order["product"]))
+    lines.append("  target %s: an alert, not an order (when it rings: trader-broker flatten)" % _price(order["target"]))
     if s["flat_by"]:
         lines.append("Flat by %s IST: anything still open then gets closed (trader-alerts rings, "
                      "trader-broker flatten)." % s["flat_by"])
@@ -691,9 +728,11 @@ def orders_from(result, source=""):
             why = "%s, weights from %s" % (why, source)
         if p["capped"]:
             why += "; capped at %s%% of the %s budget" % (_num(result["max_position_pct"]), money(result["budget"]))
-        o = {"symbol": p["ticker"], "side": "buy", "qty": str(int(p["shares"]))}
-        o.update({"type": "market", "time_in_force": "day", "why": why})
-        out.append(o)
+        if not p.get("price") or not p.get("shares"):
+            continue    # whole shares need a price; a slice without one is reported, not ordered
+        out.append({"symbol": p["ticker"], "side": "buy", "qty": int(p["shares"]), "order_type": "LIMIT",
+                    "price": kite.limit_above(p["price"], kite.DEFAULT_BUFFERS["entry_limit_buffer_pct"]),
+                    "product": "CNC", "why": why})
     return out
 
 
@@ -732,7 +771,8 @@ def report(result, orders, source=""):
     lines.append("")
     lines.append("Proposed orders (nothing has been placed):")
     for o in orders:
-        lines.append("  %s %s qty \"%s\", %s, %s" % (o["side"], o["symbol"], o["qty"], o["type"], o["time_in_force"]))
+        lines.append("  %s %s %d, LIMIT %s, %s, day" % (o["side"], o["symbol"], o["qty"], _price(o["price"]),
+                                                      o["product"]))
     lines.append("")
     lines.append("These buys have no stop. trader-risk blocks them while \"require_stop\" is true and applies "
                  "your day-trade limits to every buy.")
@@ -751,7 +791,7 @@ def write_orders(path, orders, cfg, source="", now_utc=None):
         "created_by": "trader-budget",
         "created_at": utc_iso(now_utc),
         "status": "proposed",
-        "paper": bool(cfg.get("paper", True)),
+        "dry_run": bool(cfg.get("dry_run", True)),
         "note": ("Proposals only. Nothing is placed until trader-risk passes each order "
                  "and you say yes to it in the chat."),
         "source": source,
@@ -800,7 +840,7 @@ def run_plan(a, cfg):
         cash = _f(pf.get("cash")) if isinstance(pf, dict) else None
     s = size_trade(plan, cfg, a.budget, limit, price, cash, today)
     notes = list(getattr(a, "config_notes", [])) + notes
-    order = bracket_order(s)
+    order = kite_order(s)
     if order and a.write:
         src = "trader/plan.json (%s %s %s)" % (s["symbol"], s["setup"] or "plan", s["date"] or today)
         write_orders(a.write, [order], cfg, src, now)
