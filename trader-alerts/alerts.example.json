@@ -1,8 +1,8 @@
 {
   "rules": [
     {"id": "opening-bell", "type": "opening_bell"},
-    {"id": "reliance-plan-stop", "symbol": "RELIANCE", "type": "stop", "price": 1163.35, "note": "plan stop: opening-range midpoint", "date": "2026-10-29"},
-    {"id": "reliance-plan-target", "symbol": "RELIANCE", "type": "target", "price": 1185.25, "note": "plan target: 1R (one times the risk); no order rests here on Zerodha", "date": "2026-10-29"},
+    {"id": "reliance-plan-stop", "symbol": "RELIANCE", "type": "stop", "price": 1163.3, "note": "plan stop: opening-range midpoint", "date": "2026-10-29"},
+    {"id": "reliance-plan-target", "symbol": "RELIANCE", "type": "target", "price": 1185.3, "note": "plan target: 1R (one times the risk)", "date": "2026-10-29"},
     {"id": "reliance-flat-by", "symbol": "RELIANCE", "type": "time", "at": "15:10", "label": "flat by close", "date": "2026-10-29"},
     {"id": "m&m-move-3", "symbol": "M&M", "type": "pct_move", "pct": 3}
   ]

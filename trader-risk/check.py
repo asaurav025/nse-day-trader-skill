@@ -470,7 +470,7 @@ def check(orders, cfg, portfolio=None, prices=None, state=None, today=None, now=
                                  "trigger, from trader-exit and trader-budget")
                 else:
                     warns.append("no stop: the max loss is not capped, so it is not counted in the daily loss")
-            elif ref:
+            elif ref and q is not None and q > 0:   # a bad qty is already a format BLOCK
                 if (long and stop >= ref - CENT) or (not long and stop <= ref + CENT):
                     later.append("stop: the stop %s must be %s the limit %s for a %s"
                                  % (_p(stop), "below" if long else "above", _p(ref), side))

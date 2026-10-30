@@ -223,7 +223,7 @@ def parse_yes(reply, order, batch_symbols=()):
     if DOUBT_WORDS & set(words[1:]):
         return False, "the reply has a condition or a doubt in it; ask again"
     sym = str(order.get("symbol", "")).upper()
-    tokens = set(re.findall(r"[A-Z][A-Z.\-]{0,6}", raw.upper()))
+    tokens = set(re.findall(r"[A-Z0-9][A-Z0-9&\-]{0,19}", raw.upper()))   # whole NSE symbols: M&M, BAJAJ-AUTO
     others = {s.upper() for s in batch_symbols} - {sym}
     named = tokens & others
     if named:

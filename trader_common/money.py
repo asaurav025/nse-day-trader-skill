@@ -18,6 +18,7 @@ which is valid whichever band the stock was put in. A per-symbol override
 """
 
 import math
+from decimal import ROUND_HALF_UP, Decimal
 
 TICK = 0.05   # the most common NSE equity tick (250 to 1,000); see tick_size() for the real one
 TICK_LADDER = ((250.0, 0.01), (1000.0, 0.05), (5000.0, 0.10), (10000.0, 0.50), (20000.0, 1.00))
@@ -93,7 +94,7 @@ SNAP = 0.1   # in ticks: a price this close to a tick IS that tick (half a paisa
 
 
 def tick(x, how="nearest", step=None):
-    """Round a price to its tick: 'nearest', 'down' (a stop or a sell) or 'up' (a buy limit).
+    """Round a price to its tick: 'nearest' (half up), 'down' (a stop or a sell) or 'up' (a buy limit).
     step is the stock's tick (tick_size()); without one, the coarse tick for x itself.
     Yahoo's prices are float32: 1283.60 arrives as 1283.5999755859375 (and the error grows with
     the price), so a value within SNAP of a tick counts as on it before rounding down or up;
@@ -108,6 +109,6 @@ def tick(x, how="nearest", step=None):
             k = math.floor(n)
         elif how == "up":
             k = math.ceil(n)
-        else:
-            k = math.floor(n + 0.5)
+        else:   # half up, in exact decimals: 1000.05 on a 0.10 tick is 1000.10, not 1000.00
+            k = int((Decimal(repr(float(x))) / Decimal(repr(step))).quantize(Decimal(1), rounding=ROUND_HALF_UP))
     return round(k * step, 2) + 0.0

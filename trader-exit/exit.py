@@ -131,8 +131,11 @@ def D(x, what="a number"):
 
 
 def tick(x, step=None):
-    """A price: the nearest tick (half up). step: the stock's tick (see resolve_tick)."""
-    return D(rupees.tick(float(D(x)), "nearest", step)).quantize(CENT)
+    """A price: the nearest tick, half up, in exact Decimals (a float round trip turns
+    some halves, like 1000.05 on a 0.10 tick, into 1000.0499... and rounds them down).
+    step: the stock's tick (see resolve_tick)."""
+    s = D(step or rupees.tick_size(price=float(D(x))))
+    return ((D(x) / s).quantize(Decimal(1), rounding=ROUND_HALF_UP) * s).quantize(CENT)
 
 
 def tick_down(x, step=None):
