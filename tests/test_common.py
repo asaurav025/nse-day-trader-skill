@@ -79,6 +79,20 @@ class Clock(unittest.TestCase):
         self.assertTrue(clock.calendar_known(D(2026, 12, 31)))
         self.assertFalse(clock.calendar_known(D(2027, 1, 1)))
 
+    def test_a_tools_config_file_brings_its_own_holidays(self):
+        # review finding 6: a --config outside ./trader/ had its "holidays" ignored
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            p = os.path.join(tmp, "acct.json")
+            with open(p, "w") as fh:
+                json.dump({"holidays": {"2026-12-31": "ad-hoc closure", "2026-11-10": None}}, fh)
+            clock.use_config(p)
+            self.assertEqual(clock.trading_day(D(2026, 12, 31)), (False, "NSE holiday: ad-hoc closure"))
+            self.assertEqual(clock.trading_day(D(2026, 11, 10)), (True, ""))
+        clock.set_overrides({})
+        clock.use_config(os.path.join(ROOT, "no-such-file.json"))      # a missing file changes nothing
+        self.assertEqual(clock.trading_day(D(2026, 12, 31)), (True, ""))
+
     def test_config_override_adds_and_removes(self):
         clock.set_overrides({"2026-12-31": "ad-hoc closure", "2026-11-24": None})
         self.assertEqual(clock.trading_day(D(2026, 12, 31)), (False, "NSE holiday: ad-hoc closure"))
@@ -182,6 +196,16 @@ class Money(unittest.TestCase):
                 self.assertAlmostEqual(money.tick(half, "nearest", step), round(base + step, 2), 9, (half, step))
         self.assertEqual(money.tick(1000.05, "nearest", 0.10), 1000.10)
         self.assertEqual(money.tick(1163.35, "nearest", 0.10), 1163.40)
+
+    def test_only_float_noise_snaps_so_down_stays_down(self):
+        # review finding 8: a stop 0.08 tick above a grid point used to snap UP to the next tick
+        self.assertEqual(money.tick(20104.60, "down", 5.0), 20100.0)
+        self.assertEqual(money.tick(1163.358, "down", 0.10), 1163.30)
+        self.assertEqual(money.tick(1177.8951, "up", 0.01), 1177.90)
+        self.assertEqual(money.tick(1177.8949, "up", 0.01), 1177.90)
+        self.assertEqual(money.tick(168.6701, "up", 0.01), 168.68)      # a paise stock: 0.01 tick over is over
+        self.assertEqual(money.tick(168.6799, "down", 0.01), 168.67)
+        self.assertEqual(money.tick(f32(168.67), "down", 0.01), 168.67)   # but float32 noise is still noise
 
     def test_float32_noise_never_costs_a_tick(self):
         self.assertEqual(f32(1283.6), 1283.5999755859375)

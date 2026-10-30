@@ -85,6 +85,15 @@ class ExplicitYes(unittest.TestCase):
         ok, why = ticket.parse_yes("yes BAJAJ-AUTO", reliance(), batch)
         self.assertIn("names BAJAJ-AUTO, but this order is for RELIANCE", why)
 
+    def test_a_symbol_with_digits_is_not_an_amount(self):
+        # review finding 9: "yes 20MICRONS" read 20 as the amount
+        o = {"symbol": "20MICRONS", "side": "buy", "qty": 100, "order_type": "LIMIT", "price": 175.25,
+             "product": "MIS", "stop": 172.10, "stop_limit": 171.20, "target": 181.55, "tick_size": 0.01}
+        for r in ("yes 20MICRONS", "yes 20microns.ns", "yes 100 20MICRONS"):
+            self.assertTrue(ticket.parse_yes(r, o, ["20MICRONS"])[0], r)
+        for r in ("yes 20", "yes 101 20MICRONS"):
+            self.assertFalse(ticket.parse_yes(r, o, ["20MICRONS"])[0], r)
+
     def test_amount_must_match_this_order(self):
         sell = {"symbol": "RELIANCE", "side": "sell", "qty": 48, "order_type": "LIMIT", "price": 1190.4,
                 "product": "MIS", "tick_size": 0.1}
@@ -151,6 +160,12 @@ class TicketShape(unittest.TestCase):
         for name in ("tool_input", "ALPACA_FIELDS", "is_bracket", "TIF_WORDS"):
             self.assertFalse(hasattr(ticket, name), name)
         self.assertFalse(os.path.exists(os.path.join(ROOT, "trader-broker", "claude_desktop_config.example.json")))
+
+
+def open_stop(state, dry=False):
+    """The SL leg still resting at Zerodha for RELIANCE today, or None."""
+    stops = [r for r in ticket.open_orders(state, "RELIANCE", TODAY, dry) if r.get("leg") == "stop"]
+    return stops[-1] if stops else None
 
 
 class Flow(unittest.TestCase):
@@ -246,12 +261,13 @@ class Flow(unittest.TestCase):
                           "transaction_type": "SELL", "quantity": 48, "product": "MIS", "order_type": "SL",
                           "trigger_price": 1163.3, "price": 1157.4, "validity": "DAY"})
         legs = [(r.get("leg"), r["status"]) for r in self.state_doc()["orders"]]
-        self.assertEqual(legs[2:], [(None, "filled"), ("stop", "ready"), ("stop", "placed")])
+        self.assertEqual(legs[2:], [("fill", "filled"), ("stop", "ready"), ("stop", "placed")])
         code, _, err = run(self.args("stop", "--index", "1", "--filled-qty", "48", "--filled-price", "1176.90",
                                      "--portfolio", self.pf))
         self.assertEqual(code, 1)
         self.assertIn("already has its SL leg", err)
-        with open(self.pf) as fh:
+        self.assertFalse(os.path.exists(self.pf), "a rehearsal must not touch the real portfolio")
+        with open(self.pf.replace(".json", ".dryrun.json")) as fh:
             pf = json.load(fh)
         self.assertEqual((pf["cash"], pf["positions"][0]["shares"]), (43508.8, 48))
 
@@ -297,11 +313,11 @@ class Flow(unittest.TestCase):
 
         code, text, _ = self.flatten("--last", "1196.40")
         self.assertEqual(code, 0)
-        self.assertIn("first cancel the open SL stop, order 251029000222 / SELL 30 RELIANCE, LIMIT 1,190.40", text)
+        self.assertIn("first cancel the open order for it: 251029000222 / SELL 30 RELIANCE, LIMIT 1,190.40", text)
         with open(self.orders) as fh:
             exit_order = json.load(fh)["orders"][0]
-        self.assertEqual((exit_order["cancel_order_id"], exit_order["price"], exit_order["tick_size"]),
-                         ("251029000222", 1190.4, 0.1))
+        self.assertEqual((exit_order["cancel_order_ids"], exit_order["price"], exit_order["tick_size"]),
+                         (["251029000222"], 1190.4, 0.1))
         self.assertEqual(self.run_risk(now="2026-10-29 11:40"), 0)
         with open(self.risk) as fh:
             self.assertEqual(json.load(fh)["results"][0]["kind"], "exit")
@@ -311,16 +327,99 @@ class Flow(unittest.TestCase):
         code, text, _ = run(self.args("approve", "--index", "1", "--reply", "yes sell 30 RELIANCE",
                                       now="2026-10-29 11:41"))
         self.assertEqual(code, 0)
-        self.assertIn("If the cancel fails because the SL already filled, do NOT sell", text)
+        self.assertIn("If a cancel fails because that order already filled, do NOT sell yet", text)
         self.assertEqual(run(self.args("result", "--index", "1", "--status", "placed", "--broker-id",
                                        "251029000333", now="2026-10-29 11:41"))[0], 0)
-        self.assertEqual(self.state_doc()["orders"][-1]["closes_order_id"], "251029000222")
-        self.assertIsNone(ticket.open_stop(self.state_doc(), "RELIANCE", TODAY))
+        self.assertEqual(self.state_doc()["orders"][-1]["closes_order_ids"], ["251029000222"])
+        self.assertIsNone(open_stop(self.state_doc()))
         run(["fill", "--symbol", "RELIANCE", "--side", "sell", "--qty", "30", "--price", "1190.45", "--date", TODAY,
              "--portfolio", self.pf, "--config", self.cfg, "--state", self.state])
         code, _, err = self.flatten("--last", "1196.40")
         self.assertEqual(code, 1)
         self.assertIn("nothing to flatten", err)
+
+    def live_entry_with_sl(self):
+        self.go_live()
+        self.run_risk()
+        run(self.args("approve", "--index", "1", "--reply", "yes"))
+        run(self.args("result", "--index", "1", "--status", "placed", "--broker-id", "111"))
+        run(self.args("stop", "--index", "1", "--filled-qty", "48", "--filled-price", "1177.90", "--portfolio", self.pf))
+
+    def held(self):
+        with open(self.pf) as fh:
+            return json.load(fh)["positions"][0]["shares"]
+
+    def test_rerunning_stop_after_a_failed_sl_does_not_book_the_buy_twice(self):
+        # review finding 1: the old code applied the fill again, and flatten then sold 96 against 48 held
+        self.live_entry_with_sl()
+        run(self.args("result", "--index", "1", "--leg", "stop", "--status", "failed", "--note", "rejected"))
+        code, text, _ = run(self.args("stop", "--index", "1", "--filled-qty", "48", "--filled-price", "1177.90",
+                                      "--portfolio", self.pf))
+        self.assertEqual(code, 0)
+        self.assertIn("already recorded", text)
+        self.assertEqual(self.held(), 48)
+        self.assertEqual([r["status"] for r in self.state_doc()["orders"]].count("filled"), 1)
+        self.assertEqual(self.state_doc()["orders"][-1]["status"], "ready")      # the SL can be placed again
+        code, _, err = run(self.args("stop", "--index", "1", "--filled-qty", "30", "--filled-price", "1177.90",
+                                     "--portfolio", self.pf))
+        self.assertEqual(code, 1)
+        self.assertIn("already has its SL leg", err)
+
+    def test_a_second_flatten_cancels_the_exit_still_resting(self):
+        # review finding 2: two sells for 48 could both fill
+        self.live_entry_with_sl()
+        run(self.args("result", "--index", "1", "--leg", "stop", "--status", "placed", "--broker-id", "222"))
+        self.flatten("--last", "1196.40")
+        self.run_risk(now="2026-10-29 11:40")
+        run(self.args("approve", "--index", "1", "--reply", "yes", now="2026-10-29 11:41"))
+        run(self.args("result", "--index", "1", "--status", "placed", "--broker-id", "333", now="2026-10-29 11:41"))
+        code, text, _ = self.flatten("--last", "1185.00", now="2026-10-29 11:50")    # the 1,190.40 sell is resting
+        self.assertEqual(code, 0)
+        with open(self.orders) as fh:
+            o = json.load(fh)["orders"][0]
+        self.assertEqual(o["cancel_order_ids"], ["333"])        # not the SL: that one is already cancelled
+        self.assertIn("the earlier exit sell still resting", text)
+        run(["fill", "--symbol", "RELIANCE", "--side", "sell", "--qty", "48", "--price", "1190.40", "--date", TODAY,
+             "--closes", "333", "--portfolio", self.pf, "--config", self.cfg, "--state", self.state])
+        self.assertEqual(ticket.open_orders(self.state_doc(), "RELIANCE", TODAY), [])
+
+    def test_a_cancelled_sl_with_no_sell_is_said_out_loud_and_not_cancelled_twice(self):
+        # review finding 3: the cancelled SL still looked open, so the next exit tried to cancel it again
+        self.live_entry_with_sl()
+        run(self.args("result", "--index", "1", "--leg", "stop", "--status", "placed", "--broker-id", "222"))
+        self.flatten("--last", "1196.40")
+        self.run_risk(now="2026-10-29 11:40")
+        run(self.args("approve", "--index", "1", "--reply", "yes", now="2026-10-29 11:41"))
+        code, _, err = run(self.args("result", "--index", "1", "--status", "denied", now="2026-10-29 11:41"))
+        self.assertEqual(code, 1)
+        self.assertIn("say which were cancelled", err)
+        code, _, err = run(self.args("result", "--index", "1", "--status", "denied", "--cancelled", "999",
+                                     now="2026-10-29 11:41"))
+        self.assertIn("only cancels 222", err)
+        code, text, _ = run(self.args("result", "--index", "1", "--status", "denied", "--cancelled", "222",
+                                      now="2026-10-29 11:41"))
+        self.assertEqual(code, 0)
+        self.assertIn("THE SL WAS CANCELLED BUT THE SELL DID NOT GO IN", text)
+        self.assertIsNone(open_stop(self.state_doc()))
+        self.flatten("--last", "1190.00", now="2026-10-29 11:45")
+        with open(self.orders) as fh:
+            self.assertIsNone(json.load(fh)["orders"][0].get("cancel_order_ids"))
+
+    def test_a_rehearsal_never_touches_the_real_portfolio_or_live_orders(self):
+        # review finding 4: dry-run fills used to land in trader/portfolio.json
+        with open(self.pf, "w") as fh:
+            json.dump({"cash": 100000.0, "positions": []}, fh)
+        self.run_risk()
+        run(self.args("approve", "--index", "1", "--reply", "yes"))
+        run(self.args("stop", "--index", "1", "--filled-qty", "48", "--filled-price", "1176.90", "--portfolio", self.pf))
+        with open(self.pf) as fh:
+            self.assertEqual(json.load(fh), {"cash": 100000.0, "positions": []})
+        self.assertEqual(len(ticket.open_orders(self.state_doc(), "RELIANCE", TODAY, dry=True)), 1)
+        self.assertEqual(ticket.open_orders(self.state_doc(), "RELIANCE", TODAY, dry=False), [])
+        self.go_live()          # live, the rehearsal's DRYRUN SL is never something to cancel
+        self.flatten("--last", "1196.40", "--qty", "48")
+        with open(self.orders) as fh:
+            self.assertIsNone(json.load(fh)["orders"][0].get("cancel_order_ids"))
 
     def test_no_sl_when_the_price_is_already_under_the_stop(self):
         self.go_live()
@@ -332,7 +431,7 @@ class Flow(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("Do NOT place it. Get out instead: ticket.py flatten --symbol RELIANCE", text)
         self.assertEqual(self.state_doc()["orders"][-1]["status"], "skipped")
-        self.assertIsNone(ticket.open_stop(self.state_doc(), "RELIANCE", TODAY))
+        self.assertIsNone(open_stop(self.state_doc()))
 
     def test_a_failed_stop_says_the_position_has_no_stop(self):
         self.go_live()
@@ -351,8 +450,8 @@ class Flow(unittest.TestCase):
         self.assertEqual(code, 0)
         with open(self.orders) as fh:
             o = json.load(fh)["orders"][0]
-        self.assertEqual((o["qty"], o["price"], o["tick_size"], o.get("cancel_order_id")), (48, 1190.4, 0.1, None))
-        self.assertIn("No open SL is logged today for RELIANCE", text)
+        self.assertEqual((o["qty"], o["price"], o["tick_size"], o.get("cancel_order_ids")), (48, 1190.4, 0.1, None))
+        self.assertIn("No open order is logged today for RELIANCE", text)
         self.assertNotIn("Check it against Kite get_positions", text)
         code, _, _ = run(["flatten", "--symbol", "GAIL", "--last", "168.67", "--qty", "100", "--orders", self.orders,
                           "--plan", self.none, "--config", self.cfg, "--state", self.state, "--now", NOW])
@@ -399,6 +498,7 @@ class Flow(unittest.TestCase):
         self.assertIn("DONE: declined", text)
 
     def test_fill_sell_relieves_the_oldest_lot_in_whole_shares(self):
+        self.go_live()       # a real fill goes to the real portfolio
         pf = {"cash": 0, "positions": [{"ticker": "ITC", "shares": 3, "lots": [
             {"id": "ITC-1", "date": "2026-01-02", "shares": 2, "cost": 800.0},
             {"id": "ITC-2", "date": "2026-06-02", "shares": 1, "cost": 420.0}]}]}
@@ -426,12 +526,12 @@ class Flow(unittest.TestCase):
         run(self.args("stop", "--index", "1", "--filled-qty", "48", "--filled-price", "1177.90",
                       "--portfolio", self.pf))
         run(self.args("result", "--index", "1", "--leg", "stop", "--status", "placed", "--broker-id", "222"))
-        self.assertEqual(ticket.open_stop(self.state_doc(), "RELIANCE", TODAY)["broker_order_id"], "222")
+        self.assertEqual(open_stop(self.state_doc())["broker_order_id"], "222")
         code, _, _ = run(["fill", "--symbol", "RELIANCE", "--side", "sell", "--qty", "48", "--price", "1163.10",
                           "--closes", "222", "--date", TODAY, "--portfolio", self.pf, "--config", self.cfg,
                           "--state", self.state, "--now", "2026-10-29 12:00"])
         self.assertEqual(code, 0)
-        self.assertIsNone(ticket.open_stop(self.state_doc(), "RELIANCE", TODAY))
+        self.assertIsNone(open_stop(self.state_doc()))
 
 
 if __name__ == "__main__":

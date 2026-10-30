@@ -426,6 +426,19 @@ class Cli(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("NSE has no early closes", err)
 
+    def test_an_old_bad_rule_never_silences_todays_alerts(self):
+        # review finding 5: one leftover rule from an earlier day made every check fail
+        with open(self.rules, "w") as fh:
+            json.dump({"rules": [
+                {"id": "old-flat", "type": "time", "at": "15:55", "before_close": True, "date": "2026-10-19"},
+                {"id": "rel-stop", "symbol": "RELIANCE", "type": "stop", "price": 1170.0, "date": "2026-10-29"}]}, fh)
+        code, text, err = self.check("2026-10-29 15:10")
+        self.assertEqual(code, 0, err)
+        self.assertIn("ALERT", text)
+        self.assertIn("rel-stop", text + json.dumps(json.load(open(self.state))) if os.path.exists(self.state) else text)
+        self.assertIn("an old rule was skipped and is not valid any more", text)
+        self.assertIn("NSE has no early closes", text)
+
     def test_quote_write_merges(self):
         code, text, _ = run(["quote", "RELIANCE", "M&M", "--offline", QDIR, "--write", self.prices,
                              "--now", "2026-10-29T10:00:00Z"])

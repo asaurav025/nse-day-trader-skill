@@ -726,8 +726,19 @@ def size(rows, cfg, budget=None, prices=None, top=None):
     }
 
 
-def orders_from(result, source=""):
-    """Weights mode: proposed buy orders, one per position, whole shares."""
+def weights_limits(prices, cfg):
+    """Weights mode: ({SYM: the LIMIT its buy will carry}, {SYM: tick}). Sizing at the limit, not the
+    quote, keeps each order's value inside the cap and the cash that trader-risk checks it against."""
+    try:
+        buf = kite.buffer_pct(cfg, "entry_limit_buffer_pct")
+        ticks = {sym: kite.tick_of({"symbol": sym, "price": p}, cfg) for sym, p in prices.items()}
+    except ValueError as e:
+        raise SizeError(str(e))
+    return {sym: kite.limit_above(p, buf, ticks[sym]) for sym, p in prices.items()}, ticks
+
+
+def orders_from(result, source="", ticks=None):
+    """Weights mode: proposed buy orders, one per position, whole shares, at the limit each was sized at."""
     out = []
     for p in result["positions"]:
         if p["inr"] <= 0:
@@ -739,10 +750,10 @@ def orders_from(result, source=""):
             why += "; capped at %s%% of the %s budget" % (_num(result["max_position_pct"]), money(result["budget"]))
         if not p.get("price") or not p.get("shares"):
             continue    # whole shares need a price; a slice without one is reported, not ordered
+        step = (ticks or {}).get(p["ticker"]) or rupees.tick_size(price=p["price"])
         out.append({"symbol": p["ticker"], "side": "buy", "qty": int(p["shares"]), "order_type": "LIMIT",
-                    "price": kite.limit_above(p["price"], kite.DEFAULT_BUFFERS["entry_limit_buffer_pct"],
-                                              rupees.tick_size(price=p["price"])),
-                    "product": "CNC", "tick_size": rupees.tick_size(price=p["price"]), "why": why})
+                    "price": rupees.tick(p["price"], "up", step), "product": "CNC", "tick_size": step,
+                    "why": why})
     return out
 
 
@@ -759,7 +770,7 @@ def report(result, orders, source=""):
     has_price = any("price" in p for p in r["positions"])
     head = "%-11s %-22s %8s %13s" % ("symbol", "name", "weight", "rupees")
     if has_price:
-        head += " %12s %8s" % ("price", "shares")
+        head += " %12s %8s" % ("limit", "shares")
     lines.append(head + "  note")
     for p in r["positions"]:
         row = "%-11s %-22s %7.2f%% %13s" % (p["ticker"], (p["name"] or "")[:22], p["weight"], money(p["inr"]))
@@ -845,8 +856,9 @@ def run_plan(a, cfg):
                          % (sym, ppath, ("from " + to_ist(t).strftime("%Y-%m-%d %H:%M") + " IST")
                             if t else "undated", FRESH_MINUTES))
     cash = None
-    if a.portfolio and os.path.exists(a.portfolio):
-        pf = read_json(a.portfolio, "portfolio")
+    ppath = kite.portfolio_path(a.portfolio, cfg)
+    if ppath and os.path.exists(ppath):
+        pf = read_json(ppath, "portfolio")
         cash = _f(pf.get("cash")) if isinstance(pf, dict) else None
     s = size_trade(plan, cfg, a.budget, limit, price, cash, today)
     notes = list(getattr(a, "config_notes", [])) + notes
@@ -875,8 +887,9 @@ def run_weights(a, cfg):
     prices = load_prices(a.prices)
     if not prices and os.path.exists("trader/prices.json") and not a.prices:
         prices = load_prices("trader/prices.json")
-    result = size(rows, cfg, a.budget, prices, a.top)
-    orders = orders_from(result, source)
+    limits, ticks = weights_limits(prices, cfg)
+    result = size(rows, cfg, a.budget, limits, a.top)
+    orders = orders_from(result, source, ticks)
     if a.write:
         write_orders(a.write, orders, cfg, source, parse_now(a.now))
     if a.json:

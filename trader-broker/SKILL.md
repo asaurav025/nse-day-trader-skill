@@ -7,7 +7,7 @@ description: >-
   the shares that filled; the target is an alert, not an order. Prints the
   exact place_order / cancel_order arguments for kite-mcp-server, records your
   yes word for word, then Claude's own approval prompt asks again for each
-  call. Builds the exit ticket (cancel the open SL, then a LIMIT sell) by your
+  call. Builds the exit ticket (cancel what rests, then a LIMIT sell) by your
   flat-by time, records fills, and logs each trade's max loss so trader-risk
   can hold the daily limit. Covers the static-IP setup for kite-mcp-server on
   the user's VPS (deploy/), the daily Kite login (Step 0), keys only on the
@@ -81,7 +81,7 @@ to is measured at the SL's limit.
 | `trader/orders.json` | the proposed orders (trader-budget writes it; `flatten` replaces it) |
 | `trader/state/risk.json` | trader-risk's verdicts; only a PASS from today is READY |
 | `trader/state/broker.json` | every yes, no, placed (each leg), failed and filled, with each entry's max loss |
-| `trader/portfolio.json` | cash and shares, updated by `stop` (the entry fill) and `fill` |
+| `trader/portfolio.json` | cash and shares, updated by `stop` (the entry fill, once per ticket) and `fill`. In dry run the same fills go to `trader/portfolio.dryrun.json` instead, so a rehearsal never changes the real cash or positions that sizing and risk read |
 | `trader/plan.json` | the flat-by time for `flatten` |
 | `trader/config.json` | `dry_run` (default true) and the three buffers |
 
@@ -167,6 +167,8 @@ scheduled task.
    `ticket.py result --index N --leg stop --status placed --broker-id <id>`.
    Until then the position has no stop: say so, and do it first. If `stop`
    says the price is already under the stop, do not place it: flatten instead.
+   If the SL call fails, record `--status failed` and run `stop` again: the fill
+   is recorded once per ticket and is never booked twice.
 
 ## Steps: while it is open, and out by flat-by
 
@@ -180,16 +182,23 @@ scheduled task.
   about 15:20), close anything still open:
   1. `get_positions` and `get_ltp` (read only): the shares held and the last price.
   2. `ticket.py flatten --symbol RELIANCE --last <ltp> [--qty <held>]` writes
-     the exit ticket: cancel the open SL (taken from today's log), then a LIMIT
-     sell 0.5% under the last price.
+     the exit ticket: cancel every order still resting for the symbol (the SL,
+     and any earlier exit sell that has not filled, from today's log), then a
+     LIMIT sell 0.5% under the last price. Dry-run and live orders never mix.
   3. `/trader-risk`. A sell that only closes what the user holds is never
      blocked by the daily limits or the entry window.
   4. `ticket.py show`, then the user's yes for that one ticket, as above.
-  5. Live: `cancel_order` first (its own prompt). If Kite says the SL already
-     completed, do NOT sell: record that fill and stop. Then `place_order`
-     with the sell, then `result`. A LIMIT under the market fills at the best
-     bid or better; if the price fell through it, it rests: check `get_orders`
-     and flatten again with a fresh `--last`.
+  5. Live: each `cancel_order` first (each its own prompt). If Kite says an
+     order already completed, do NOT sell yet: check `get_positions`, record
+     that fill (`fill ... --closes <its id>`) and sell only what is still held.
+     Then `place_order` with the sell, then
+     `ticket.py result --index N --status placed|denied|failed --broker-id <sell id>
+     --cancelled <ids that were cancelled, or none>`. When the sell did not go
+     in, `--cancelled` is required: a cancelled SL with no sell means the
+     position has no stop and no exit, and the tool says so. A LIMIT under the
+     market fills at the best bid or better; if the price fell through it, it
+     rests: check `get_orders` and flatten again with a fresh `--last` (the new
+     ticket cancels the resting sell first, so two sells can never both fill).
 
 ## Example: the reel (dry run)
 
@@ -216,7 +225,7 @@ ORDER 1 of 1, Zerodha (Kite), DRY RUN: nothing is sent
 (`DRYRUN-entry-...`), and `stop --filled-qty 48 --filled-price 1176.90` prints
 leg 2 (`order_type` SL, `trigger_price` 1163.3, `price` 1157.4, `quantity` 48).
 At 11:40 the target alert rings with the last price 1,196.40; `flatten` writes
-"first cancel the open SL stop, order DRYRUN-stop-... / SELL 48 RELIANCE,
+"first cancel the open order for it: DRYRUN-stop-... / SELL 48 RELIANCE,
 LIMIT 1,190.40", trader-risk passes it as an exit, and the user's yes logs it.
 Live, each of those calls would have shown Claude's approval prompt first.
 

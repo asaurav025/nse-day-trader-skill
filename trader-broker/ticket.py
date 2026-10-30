@@ -169,8 +169,10 @@ def plain_parts(order):
     q = _str_num(order.get("qty"))
     product = str(order.get("product") or "MIS").upper()
     parts = []
-    if order.get("cancel_order_id"):
-        parts.append("first cancel the open SL stop, order %s" % order["cancel_order_id"])
+    cancels = kite.cancels_of(order)
+    if cancels:
+        parts.append("first cancel the open order%s for it: %s" % ("" if len(cancels) == 1 else "s",
+                                                                   ", ".join(cancels)))
     parts.append("%s %s %s, LIMIT %s, %s, good for today" % (side, q, sym, _p(order.get("price")), product))
     if is_entry_ticket(order) and order.get("stop") is not None:
         leg = "then, once it fills: SELL those shares with an SL stop, trigger %s" % _p(order["stop"])
@@ -228,7 +230,8 @@ def parse_yes(reply, order, batch_symbols=()):
     named = tokens & others
     if named:
         return False, "the reply names %s, but this order is for %s" % (", ".join(sorted(named)), sym)
-    nums = [float(n.replace(",", "")) for n in re.findall(r"\d[\d,]*(?:\.\d+)?", raw)]
+    amounts = re.sub(r"(?<![A-Z0-9&-])%s(?![A-Z0-9&-])" % re.escape(sym), " ", raw.upper())  # 20MICRONS is no 20
+    nums = [float(n.replace(",", "")) for n in re.findall(r"\d[\d,]*(?:\.\d+)?", amounts)]
     if nums:
         want = amount_numbers(order)
         if not any(abs(n - w) < 0.005 for n in nums for w in want):
@@ -241,9 +244,7 @@ def parse_yes(reply, order, batch_symbols=()):
 
 def calls_for(order):
     """The tool calls a ticket makes, in order, before any fill: [(tool, arguments)]."""
-    calls = []
-    if order.get("cancel_order_id"):
-        calls.append((TOOL_CANCEL, kite.cancel_args(order["cancel_order_id"])))
+    calls = [(TOOL_CANCEL, kite.cancel_args(oid)) for oid in kite.cancels_of(order)]
     calls.append((TOOL_PLACE, kite.entry_leg(order)))
     return calls
 
@@ -309,18 +310,36 @@ def kind_of(order, rv):
     return "entry" if is_entry_ticket(order) else "exit"
 
 
-def open_stop(state, symbol, today):
-    """Today's SL stop for symbol that is placed and not yet cancelled or filled: the record, or None."""
-    stops, closed = [], set()
+def closed_ids(rec):
+    """The Zerodha order ids a log record says are finished (cancelled or filled)."""
+    out = list(rec.get("closes_order_ids") or [])
+    if rec.get("closes_order_id"):
+        out.append(rec["closes_order_id"])
+    return out
+
+
+def open_orders(state, symbol, today, dry=False):
+    """Today's orders for symbol that rest at Zerodha (each SL leg, each exit sell) and are not yet
+    cancelled or filled, oldest first. Dry-run records and live ones never mix."""
+    resting, closed = [], set()
     for rec in state.get("orders", []):
         if rec_day(rec) != today or str(rec.get("symbol", "")).upper() != symbol:
             continue
-        if rec.get("leg") == "stop" and rec.get("status") == "placed" and rec.get("broker_order_id"):
-            stops.append(rec)
-        if rec.get("closes_order_id"):
-            closed.add(rec["closes_order_id"])
-    live = [r for r in stops if r["broker_order_id"] not in closed]
-    return live[-1] if live else None
+        if bool(rec.get("dry_run")) != bool(dry):
+            continue
+        closed.update(closed_ids(rec))
+        if rec.get("status") == "placed" and rec.get("broker_order_id") and (
+                rec.get("leg") == "stop" or (rec.get("leg", "entry") == "entry" and rec.get("kind") == "exit")):
+            resting.append(rec)
+    return [r for r in resting if r["broker_order_id"] not in closed]
+
+
+def entry_fill(state, fp, today):
+    """The entry fill already recorded for this ticket today (ticket.py stop records it once), or None."""
+    for rec in state.get("orders", []):
+        if rec.get("status") == "filled" and rec.get("fingerprint") == fp and rec_day(rec) == today:
+            return rec
+    return None
 
 
 def dry_id(fp, leg):
@@ -421,14 +440,18 @@ def apply_fill(portfolio_path, cfg, symbol, side, qty, price, date):
     return pf
 
 
-def log_fill(state_path, now, today, symbol, side, qty, price, closes=None, dry=False):
-    """A fill in the log; closes = the Zerodha order id it ends (an SL that filled)."""
+def log_fill(state_path, now, today, symbol, side, qty, price, closes=None, dry=False, fp=None):
+    """A fill in the log; closes = the Zerodha order id it ends (an SL or exit that filled); fp = the
+    ticket whose entry this fill is (so it is recorded once)."""
     state = load_state(state_path)
     rec = {"at": ist_iso(now), "date": today, "status": "filled", "symbol": symbol.upper(), "side": side,
            "qty": _str_num(float(qty)), "price": float(price),
            "plain": "%s %s %s at %s" % (side.upper(), _str_num(float(qty)), symbol.upper(), _p(price))}
     if closes:
         rec["closes_order_id"] = closes
+    if fp:
+        rec["fingerprint"] = fp
+        rec["leg"] = "fill"      # its own leg, so latest(..., "entry") still finds the placed entry
     if dry:
         rec["dry_run"] = True
     state.setdefault("orders", []).append(rec)
@@ -511,8 +534,8 @@ def cmd_approve(a):
     sim_id = dry_id(fp, "entry" if kind == "entry" else "exit")
     if dry:
         sim = _record(order, a, today, now, "placed", broker_order_id=sim_id, **common)
-        if order.get("cancel_order_id"):
-            sim["closes_order_id"] = order["cancel_order_id"]
+        if kite.cancels_of(order):
+            sim["closes_order_ids"] = kite.cancels_of(order)
         state["orders"].append(sim)
     write_json(a.state, state)
     print("Recorded your yes for order %d: %s." % (a.index, plain(order)))
@@ -529,10 +552,14 @@ def cmd_approve(a):
     print("Now make these calls, one at a time, each through Claude's own approval prompt (allow once):")
     for l in call_lines(calls, "  "):
         print(l)
-    if order.get("cancel_order_id"):
-        print("If the cancel fails because the SL already filled, do NOT sell: check get_positions, record the "
-              "SL fill (ticket.py fill ... --closes %s) and stop." % order["cancel_order_id"])
-    print("Then: ticket.py result --index %d --status placed|denied|failed --broker-id <order id>" % a.index)
+    cancels = kite.cancels_of(order)
+    if cancels:
+        print("If a cancel fails because that order already filled, do NOT sell yet: check get_positions, record "
+              "the fill (ticket.py fill ... --closes <its id>), and sell only what is still held.")
+        print("Then: ticket.py result --index %d --status placed|denied|failed --broker-id <sell order id> "
+              "--cancelled <the ids that were cancelled, comma separated, or none>" % a.index)
+    else:
+        print("Then: ticket.py result --index %d --status placed|denied|failed --broker-id <order id>" % a.index)
     return 0
 
 
@@ -570,16 +597,35 @@ def cmd_result(a):
         new["broker_order_id"] = a.broker_id
     if a.note:
         new["note"] = a.note
-    if a.leg == "entry" and a.status == "placed" and order.get("cancel_order_id"):
-        new["closes_order_id"] = order["cancel_order_id"]
+    cancels = kite.cancels_of(order) if a.leg == "entry" else []
+    done = []
+    if cancels:
+        if a.cancelled is None:
+            if a.status != "placed":
+                raise TicketError("this exit ticket cancels %s first: say which were cancelled, --cancelled ID,ID "
+                                  "or --cancelled none" % ", ".join(cancels))
+            done = cancels          # the sell was placed, so its cancels went through
+        elif a.cancelled.strip().lower() != "none":
+            done = [x.strip() for x in a.cancelled.split(",") if x.strip()]
+            stray = [x for x in done if x not in cancels]
+            if stray:
+                raise TicketError("--cancelled %s: this ticket only cancels %s" % (", ".join(stray), ", ".join(cancels)))
+        if done:
+            new["closes_order_ids"] = done
+    elif a.cancelled:
+        raise TicketError("--cancelled is for an exit ticket that cancels open orders first")
     if a.status == "placed" and not a.broker_id:
         raise TicketError("a placed order needs --broker-id (the order id Zerodha returned)")
     state["orders"].append(new)
     write_json(a.state, state)
     print("Recorded order %d %s leg as %s." % (a.index, a.leg, a.status))
     if a.status != "placed":
+        stops = {r["broker_order_id"] for r in state["orders"] if r.get("leg") == "stop" and r.get("broker_order_id")}
         if a.leg == "stop":
             print("THE POSITION HAS NO STOP AT ZERODHA. Fix it now (ticket.py stop again) or flatten it.")
+        elif stops & set(done):
+            print("THE SL WAS CANCELLED BUT THE SELL DID NOT GO IN: the position has no stop and no exit. Flatten "
+                  "again now (ticket.py flatten), or ask the user before anything else.")
         return 0
     if a.leg == "entry" and is_entry_ticket(order) and order.get("stop") is not None:
         print("When it fills (get_order_history %s, or get_orders), place the SL for what filled:" % a.broker_id)
@@ -617,10 +663,20 @@ def cmd_stop(a):
     stop = float(order["stop"])
     ref = _f(a.last) or px
     dry = dry_run(cfg)
-    apply_fill(a.portfolio, cfg, order["symbol"], "buy", q, px, today)
-    log_fill(a.state, now, today, order["symbol"], "buy", q, px, dry=dry)
+    booked = entry_fill(state, fp, today)
+    if booked:
+        if abs(float(booked["qty"]) - q) > 1e-9:
+            raise TicketError("the entry fill is already recorded as %s %s at %s: the SL is for those shares "
+                              "(record any change with ticket.py fill)" % (booked["qty"], order["symbol"],
+                                                                           _p(booked["price"])))
+        print("The entry fill is already recorded (%s %s at %s); not booking it again."
+              % (booked["qty"], order["symbol"], _p(booked["price"])))
+    else:
+        apply_fill(kite.portfolio_path(a.portfolio, cfg), cfg, order["symbol"], "buy", q, px, today)
+        log_fill(a.state, now, today, order["symbol"], "buy", q, px, dry=dry, fp=fp)
+        print("Recorded the entry fill: BUY %s %s at %s%s." % (_str_num(q), order["symbol"], _p(px),
+                                                             " (dry run portfolio)" if dry else ""))
     state = load_state(a.state)
-    print("Recorded the entry fill: BUY %s %s at %s." % (_str_num(q), order["symbol"], _p(px)))
     if ref <= stop + 1e-9:
         state["orders"].append(_record(order, a, today, now, "skipped", leg="stop", kind="stop", qty=int(q),
                                        note="price %s at or under the stop %s" % (_p(ref), _p(stop))))
@@ -665,10 +721,11 @@ def cmd_fill(a):
     date = a.date or to_ist(now).date().isoformat()
     if not re.match(r"^\d{4}-\d{2}-\d{2}$", date):
         raise TicketError("--date wants a date like 2026-10-29")
-    pf = apply_fill(a.portfolio, cfg, sym, a.side, a.qty, a.price, date)
+    path = kite.portfolio_path(a.portfolio, cfg)
+    pf = apply_fill(path, cfg, sym, a.side, a.qty, a.price, date)
     log_fill(a.state, now, date, sym, a.side, a.qty, a.price, closes=a.closes, dry=dry_run(cfg))
     print("Recorded %s %s %s at %s on %s in %s. Cash now %s." % (a.side, a.qty, sym, _money(a.price), date,
-                                                                a.portfolio, _money(pf["cash"])))
+                                                                path, _money(pf["cash"])))
     return 0
 
 
@@ -691,18 +748,19 @@ def cmd_flatten(a):
         if qty is None or qty <= 0 or abs(qty - round(qty)) > 1e-9:
             raise TicketError("--qty wants the whole number of shares you hold, like --qty 48")
     else:
-        pf = read_json(a.portfolio, "portfolio", required=False) or {}
+        path = kite.portfolio_path(a.portfolio, cfg)
+        pf = read_json(path, "portfolio", required=False) or {}
         qty = sum(_f(p.get("shares", p.get("qty"))) or 0 for p in pf.get("positions", [])
                   if (nse.normalize(p.get("ticker") or p.get("symbol")) or "") == sym)
-        source = a.portfolio
+        source = path
         if qty <= 1e-9:
             raise TicketError("nothing to flatten: no %s shares in %s. Check Kite (get_positions) and pass --qty "
-                              "if you do hold some" % (sym, a.portfolio))
+                              "if you do hold some" % (sym, path))
     plan = read_json(a.plan, "plan", required=False) or {}
     flat_by = (plan.get("flat_by") if (nse.normalize(plan.get("symbol")) or "") == sym else None) \
         or cfg.get("flat_by") or clock.hm(clock.FLAT_BY)
     state = load_state(a.state)
-    stop = open_stop(state, sym, today)
+    resting = open_orders(state, sym, today, dry_run(cfg))
     try:
         step = kite.tick_of({"symbol": sym, "price": last}, cfg,
                             plan if (nse.normalize(plan.get("symbol")) or "") == sym else None)
@@ -713,8 +771,8 @@ def cmd_flatten(a):
              "product": "MIS", "tick_size": step,
              "why": "flat by %s IST: closes the %s day trade, LIMIT %s%% under the last %s (qty from %s)"
              % (flat_by, sym, rupees.num(buf, 1) if buf != int(buf) else int(buf), _p(last), source)}
-    if stop:
-        order["cancel_order_id"] = stop["broker_order_id"]
+    if resting:
+        order["cancel_order_ids"] = [r["broker_order_id"] for r in resting]
     old = read_json(a.orders, "orders", required=False)
     replaced = len(old.get("orders", [])) if isinstance(old, dict) else 0
     doc = {"created_by": "trader-broker", "created_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"), "status": "proposed",
@@ -725,11 +783,13 @@ def cmd_flatten(a):
     print("Flatten %s: %s (flat by %s IST)." % (sym, plain(order), flat_by))
     print("Wrote it to %s%s." % (a.orders, (" (it replaced %d earlier proposal%s)"
                                              % (replaced, "" if replaced == 1 else "s")) if replaced else ""))
-    if stop:
-        print("It cancels the open SL first (order %s, logged %s): Zerodha would otherwise hold those shares "
-              "for it." % (stop["broker_order_id"], stop["at"]))
-    else:
-        print("No open SL is logged today for %s. If one is open at Zerodha (get_orders), cancel it first." % sym)
+    for r in resting:
+        print("It cancels %s first (order %s, logged %s)%s." % (
+            "the open SL" if r.get("leg") == "stop" else "the earlier exit sell still resting", r["broker_order_id"],
+            r["at"], ": Zerodha would otherwise hold those shares for it" if r.get("leg") == "stop"
+            else ", so two sells can never both fill"))
+    if not resting:
+        print("No open order is logged today for %s. If one is open at Zerodha (get_orders), cancel it first." % sym)
     if a.qty is None:
         print("The qty comes from %s. Check it against Kite get_positions before you say yes." % source)
     print("Next:")
@@ -737,7 +797,7 @@ def cmd_flatten(a):
     print("     limits or the entry window.")
     print("  2. ticket.py show, then the user's yes for this one ticket.")
     print("  3. A LIMIT under the market fills at the best bid or better; if the price drops through it, it rests:")
-    print("     check get_orders and flatten again with a fresh --last.")
+    print("     check get_orders and flatten again with a fresh --last (it cancels the resting sell first).")
     return 0
 
 
@@ -796,6 +856,8 @@ def main(argv=None):
     p.add_argument("--leg", choices=["entry", "stop"], default="entry")
     p.add_argument("--status", required=True, choices=["placed", "denied", "failed"])
     p.add_argument("--broker-id", help="the order id Zerodha returned")
+    p.add_argument("--cancelled", metavar="IDS",
+                   help="exit tickets: the order ids that cancel_order did cancel (comma separated), or none")
     p.add_argument("--note")
     p = sub.add_parser("stop", help="after the entry fills: record the fill and print the SL leg")
     common(p)

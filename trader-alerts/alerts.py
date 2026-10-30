@@ -341,10 +341,10 @@ def evaluate(rules, quotes, status, state, now_utc):
     stamp = now_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
     rings = []
     for r in rules:
+        if not active(r, today):
+            continue             # an old rule, even a malformed one, never stops today's alerts
         validate(r)
         rid = r.get("id") or "%s-%s" % (r.get("symbol", "market"), r["type"])
-        if not active(r, today):
-            continue
         typ = {"stop": "below", "target": "above"}.get(r["type"], r["type"])
         if typ == "opening_bell":
             if status["open"] and not _rang_today(rung.get(rid), today):
@@ -502,8 +502,15 @@ def cmd_check(a):
     now = parse_now(a.now)
     status = market_status(now)
     watched = [r for r in rules if active(r, status["date"])]
-    for r in rules:
+    for r in watched:
         validate(r)
+    stale = []
+    for r in rules:
+        if r not in watched:
+            try:
+                validate(r)
+            except AlertError as e:
+                stale.append(str(e))
     syms = _dedupe([nse.normalize(r.get("symbol")) for r in watched if r.get("type") not in NO_QUOTE])
     quotes, errors = (get_quotes(syms, a.offline) if syms else ({}, []))
     state = _read(a.state, {})
@@ -513,7 +520,7 @@ def cmd_check(a):
         if quotes:
             write_prices(a.prices_out, quotes, now)
     if a.json:
-        print(json.dumps({"market": status, "rings": rings, "errors": errors,
+        print(json.dumps({"market": status, "rings": rings, "errors": errors, "skipped_old_rules": stale,
                           "quotes": {s: q["price"] for s, q in quotes.items()}}, indent=2))
     else:
         print("NSE %s (%s IST, %s)." % ("OPEN" if status["open"] else "closed", status["now_ist"],
@@ -526,6 +533,8 @@ def cmd_check(a):
                 if quotes else ""))
         for e in errors:
             print("error: " + e)
+        for e in stale:
+            print("note: an old rule was skipped and is not valid any more (%s); remove it from %s" % (e, a.rules))
         if rings:
             print("An alert is information, not an order. On Zerodha only the SL stop rests at the broker; "
                   "the target is this alert. Check get_positions / get_orders and record any fill (ticket.py "
@@ -681,6 +690,7 @@ def main(argv=None):
     p.add_argument("id")
     p.add_argument("--state", default="trader/state/alerts.json")
     a = ap.parse_args(argv)
+    clock.use_config(getattr(a, "config", None))   # its "holidays" override, wherever it is
     if not a.cmd:
         ap.print_help()
         return 1

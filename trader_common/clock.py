@@ -151,6 +151,13 @@ def load_overrides(path=None):
     return {str(k): (str(v) if v else None) for k, v in hol.items()}
 
 
+def use_config(path):
+    """A tool's --config: when that file exists, its "holidays" override is the one used (not only
+    $TRADER_CONFIG or ./trader/config.json)."""
+    if path and os.path.isfile(path):
+        set_overrides(load_overrides(path))
+
+
 def set_overrides(overrides):
     """Tests and tools that already read the config: {date: name or None}; None resets to the file."""
     global _overrides

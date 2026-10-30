@@ -829,6 +829,7 @@ def main(argv=None):
     p.add_argument("--watchlist", default="trader/watchlist.json")
     p.add_argument("--json", action="store_true")
     a = ap.parse_args(argv)
+    clock.use_config(getattr(a, "config", None))   # its "holidays" override, wherever it is
     if not a.cmd:
         ap.print_help()
         return 1

@@ -177,8 +177,10 @@ class Format(unittest.TestCase):
         self.assertEqual(one([order(qty="48")])["verdict"], "PASS")
 
     def test_cancel_order_id_belongs_on_an_exit(self):
-        r = one([order(cancel_order_id="251029000222")])
-        self.assertIn("cancel_order_id belongs on an exit", " ".join(r["reasons"]))
+        r = one([order(cancel_order_id="251029000222")])      # the legacy single id is still read
+        self.assertIn("cancel_order_ids belong on an exit", " ".join(r["reasons"]))
+        r = one([order(cancel_order_ids=["251029000222", "251029000333"])])
+        self.assertIn("cancel_order_ids belong on an exit", " ".join(r["reasons"]))
 
     def test_the_sl_leg(self):
         r = one([order(stop=None)])

@@ -323,6 +323,14 @@ class Cli(unittest.TestCase):
         self.assertIn("squaring off MIS positions", p["warnings"][0])
         code, text, _ = self.plan("--flat-by", "15:20", "--json")
         self.assertEqual(json.loads(text)["warnings"], [])
+        for off in ("15:12", "14:47"):                       # review finding 10: the time machine needs the grid
+            code, _, err = self.plan("--flat-by", off)
+            self.assertEqual(code, 1, off)
+            self.assertIn("not on the 5-minute grid", err)
+        self.write(os.path.join("trader", "config.json"), {"flat_by": "15:12"})
+        code, _, err = self.plan()
+        self.assertIn("flat_by 15:12 is not on the 5-minute grid", err)
+        os.remove(os.path.join("trader", "config.json"))
         for late in ("15:30", "16:00"):
             code, _, err = self.plan("--flat-by", late)
             self.assertEqual(code, 1, late)

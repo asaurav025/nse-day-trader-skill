@@ -379,8 +379,8 @@ def check(orders, cfg, portfolio=None, prices=None, state=None, today=None, now=
             reasons.append("format: a LIMIT order needs a price")
         if o.get("stop_limit") is not None and o.get("stop") is None:
             reasons.append("format: stop_limit needs a stop (the SL trigger)")
-        if o.get("cancel_order_id") is not None and side != "sell":
-            reasons.append("format: cancel_order_id belongs on an exit (sell) ticket")
+        if kite.cancels_of(o) and side != "sell":
+            reasons.append("format: cancel_order_ids belong on an exit (sell) ticket")
 
         # asset
         if sym and FNO.match(sym.replace(" ", "")):
@@ -672,7 +672,8 @@ def main(argv=None):
         if not isinstance(orders, list) or not orders:
             raise RiskError("no orders in %s" % a.orders)
         cfg = read_json(a.config, "config", required=False) or {}
-        portfolio = read_json(a.portfolio, "portfolio", required=False)
+        clock.use_config(a.config)
+        portfolio = read_json(kite.portfolio_path(a.portfolio, cfg), "portfolio", required=False)
         pdoc = read_json(a.prices, "prices", required=False) or {}
         prices, times = load_prices(pdoc)
         state = read_json(a.state, "broker state", required=False)

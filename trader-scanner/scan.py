@@ -970,6 +970,7 @@ def main(argv=None):
                    % clock.hm(clock.NO_ENTRIES_AFTER))
     p.add_argument("--config", default="trader/config.json")
     a = ap.parse_args(argv)
+    clock.use_config(getattr(a, "config", None))   # its "holidays" override, wherever it is
     if not a.cmd:
         ap.print_help()
         return 1

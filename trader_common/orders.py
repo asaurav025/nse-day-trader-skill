@@ -9,7 +9,7 @@ One proposed order in trader/orders.json is one ticket:
           "target": 1196.30, "tick_size": 0.10, "why": "...", "plan": {...}}
   exit   {"symbol": "RELIANCE", "side": "sell", "qty": 48, "order_type": "LIMIT",
           "price": 1190.40, "product": "MIS", "tick_size": 0.10,
-          "cancel_order_id": "<the open SL stop>", "why": "..."}
+          "cancel_order_ids": ["<the open SL stop>", "<an earlier exit still resting>"], "why": "..."}
 
 Every price is a whole number of the stock's tick_size (trader_common/money.py:
 NSE's price-band ticks), or Kite rejects the order.
@@ -21,7 +21,8 @@ mcp/post_tools.go; numbers are JSON numbers):
   leg 2, stop    place_order  SELL SL, trigger_price = stop, price = stop_limit,
                  quantity = what the entry filled; only after the entry has filled
   target         no order: a trader-alerts alert, then an exit ticket
-  exit           cancel_order the open SL (if any), then place_order SELL LIMIT
+  exit           cancel_order every open order for the symbol (the SL, an earlier exit
+                 still resting), then place_order SELL LIMIT
 
 Why LIMIT and SL, not MARKET and SL-M: Kite rejects API MARKET and SL-M orders
 without a market_protection value, and kite-mcp-server v0.3.2 cannot send one.
@@ -33,6 +34,7 @@ max loss is therefore measured at stop_limit, the worst fill that still happens.
 
 import hashlib
 import json
+import os
 
 from trader_common import money, symbols
 
@@ -47,7 +49,7 @@ DEFAULT_BUFFERS = {             # percent; config keys of the same names overrid
     "exit_limit_buffer_pct": 0.5,
 }
 FP_FIELDS = ("symbol", "side", "qty", "order_type", "price", "product", "stop", "stop_limit", "target",
-             "tick_size", "cancel_order_id")
+             "tick_size", "cancel_order_ids")
 PRICE_KEYS = ("price", "stop", "stop_limit", "target")
 TAG_PREFIX = "ndt"              # Kite tag: alphanumeric, at most 20 characters
 
@@ -103,6 +105,8 @@ def _canon(k, v):
     if k in PRICE_KEYS or k == "tick_size":
         f = _num(v)
         return "%.2f" % f if f is not None else str(v)
+    if k == "cancel_order_ids":
+        return ",".join(str(x) for x in v)
     if k in ("side",):
         return str(v).strip().lower()
     if k in ("order_type", "product", "symbol"):
@@ -143,6 +147,23 @@ def stop_leg(order, filled_qty):
     leg.update({"order_type": "SL", "trigger_price": round(float(order["stop"]), 2),
                 "price": round(float(order["stop_limit"]), 2), "validity": VALIDITY, "tag": tag(order)})
     return leg
+
+
+def cancels_of(order):
+    """The order ids an exit ticket cancels first (a legacy single cancel_order_id is accepted)."""
+    ids = list(order.get("cancel_order_ids") or [])
+    if order.get("cancel_order_id") and order["cancel_order_id"] not in ids:
+        ids.insert(0, order["cancel_order_id"])
+    return [str(x) for x in ids]
+
+
+def portfolio_path(path, cfg):
+    """Dry run keeps its pretend fills out of the real portfolio: trader/portfolio.json ->
+    trader/portfolio.dryrun.json while "dry_run" is not false."""
+    if (cfg or {}).get("dry_run", True) is False or not path:
+        return path
+    base, ext = os.path.splitext(path)
+    return base + ".dryrun" + (ext or ".json")
 
 
 def cancel_args(order_id):

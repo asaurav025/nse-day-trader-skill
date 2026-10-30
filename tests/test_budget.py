@@ -326,8 +326,9 @@ class WeightsMode(unittest.TestCase):
         self.assertAlmostEqual(r["idle"], round(r["investable"] - r["invested"], 2))
 
     def test_orders_are_cnc_limit_buys_on_the_tick(self):
-        r = size.size(self.rows, cfg(max_position_pct=40), prices=PRICES)
-        orders = size.orders_from(r, "example")
+        limits, ticks = size.weights_limits(PRICES, cfg())
+        r = size.size(self.rows, cfg(max_position_pct=40), prices=limits)
+        orders = size.orders_from(r, "example", ticks)
         self.assertEqual(len(orders), 5)
         for o in orders:
             self.assertEqual((o["side"], o["order_type"], o["product"]), ("buy", "LIMIT", "CNC"))
@@ -337,6 +338,17 @@ class WeightsMode(unittest.TestCase):
         self.assertEqual((rel["tick_size"], rel["price"]), (0.1, 1177.90))
         hdfc = [o for o in orders if o["symbol"] == "HDFCBANK"][0]
         self.assertEqual((hdfc["tick_size"], hdfc["price"]), (0.05, 684.55))   # 682.50 x 1.003 = 684.55
+
+    def test_weights_are_sized_at_their_limit_so_no_order_breaks_the_cap(self):
+        # review finding: sizing at the quote and buying 0.3 % higher put an order over the cap
+        c = cfg(max_position_pct=40)
+        limits, ticks = size.weights_limits(PRICES, c)
+        r = size.size(self.rows, c, prices=limits)
+        for o in size.orders_from(r, "example", ticks):
+            self.assertLessEqual(o["qty"] * o["price"], r["cap"] + 1e-6, o)
+        # and the configured buffer is the one used (0.1 %, not the default 0.3 %)
+        lim01, _ = size.weights_limits(PRICES, cfg(entry_limit_buffer_pct=0.1))
+        self.assertEqual(lim01["RELIANCE"], 1175.50)    # 1174.30 x 1.001 = 1175.47, up to the 0.10 tick
 
     def test_cap_redistributes_until_nobody_is_over(self):
         r = size.size(self.rows, cfg(max_position_pct=22), prices=PRICES)

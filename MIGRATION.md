@@ -26,7 +26,7 @@ Connect docs, the zerodha/kite-mcp-server source).
 | news | Yahoo RSS + SEC 8-K | Yahoo RSS (`.NS`) + Google News RSS by company name |
 | PDT | `pdt_guard` (FINRA) | removed |
 | skills | 11 | 9 (analyst and pelosi dropped) |
-| tests | 315, US fixtures | 361, real NSE fixtures |
+| tests | 315, US fixtures | 370, real NSE fixtures |
 
 ## Decisions taken with the repo owner
 
@@ -69,8 +69,10 @@ the way the original plan assumed. They were asked, not guessed.
    company's NSE name and says which headlines actually name the stock.
 9. **The yes check missed NSE symbols.** `parse_yes` let "yes HDFCBANK",
    "yes BAJAJ-AUTO" and "yes M&M" through as a yes for a RELIANCE ticket (its
-   symbol pattern was built for short US tickers). Only that one regex changed;
-   the rest of `parse_yes` is upstream's, line for line.
+   symbol pattern was built for short US tickers), and read the 20 in
+   "yes 20MICRONS" as an amount. Two lines changed (the symbol pattern, and
+   the ticket's own symbol is taken out before amounts are read); the rest of
+   `parse_yes` is upstream's, line for line.
 
 Two more calls made on the way, both conservative, both easy to change:
 
@@ -80,6 +82,38 @@ Two more calls made on the way, both conservative, both easy to change:
   filled in).
 - **Dry run logs a simulated placement** (`DRYRUN-...` ids), so daily limits,
   the SL leg and flatten rehearse exactly as they would live.
+
+## Fixes from the independent code review of PR #1
+
+A reviewer with no part in the port read the PR and found ten problems; all
+were fixed with a regression test each.
+
+1. Re-running `ticket.py stop` after a failed SL booked the entry fill twice
+   (96 shares on paper for 48 held, and flatten would then sell 96). The entry
+   fill is now recorded once per ticket.
+2. A second `flatten` did not cancel an earlier exit sell still resting, so two
+   sells could both fill. An exit ticket now cancels every order still resting
+   for the symbol (`cancel_order_ids`).
+3. When the exit's cancel went through but its sell did not, the cancelled SL
+   still looked open. `result` now records which cancels went through
+   (`--cancelled`, required when the sell was not placed) and says plainly when
+   the position has no stop and no exit.
+4. Dry-run fills were written to the real `trader/portfolio.json`. They now go
+   to `trader/portfolio.dryrun.json`, read by budget, risk and flatten in dry
+   run; live mode never sees a dry-run order.
+5. One leftover alert rule from an earlier day (a `before_close` key) stopped
+   every alert from ringing. Only today's rules are validated; old ones are
+   reported and skipped.
+6. A `"holidays"` override in a config given with `--config` was ignored. Every
+   calendar-aware tool now reads its own config's override.
+7. Weights mode sized at the quote and bought 0.3 % higher with a fixed buffer,
+   so an order could break the cap. It sizes at the limit, with the configured
+   buffer and tick.
+8. The float-noise snap could round a computed stop toward the entry on a
+   high-priced stock. Only float noise (2e-7 of the value) snaps now.
+9. "yes 20MICRONS" was read as an amount of 20 (see decision 9).
+10. trader-exit accepted an off-grid `flat_by` (15:12) that the time machine then
+    refused. trader-exit refuses it.
 
 ## What changed, skill by skill
 
@@ -242,9 +276,10 @@ What you should see, step by step:
    `DRYRUN-entry-...`. `stop` prints the SL leg (`order_type` SL, trigger
    1163.3, price 1157.4, quantity 48).
 9. Alerts: stop 1163.3, target 1196.3, flat-by 15:10.
-10. Flatten: "first cancel the open SL stop, order DRYRUN-stop-... / SELL 48
+10. Flatten: "first cancel the open order for it: DRYRUN-stop-... / SELL 48
     RELIANCE, LIMIT 1,190.40"; trader-risk passes it as an exit; the yes is
-    logged; cash ends at ₹1,00,650.40.
+    logged; cash ends at ₹1,00,650.40 in `trader/portfolio.dryrun.json`. The
+    rehearsal never creates or changes the real `trader/portfolio.json`.
 
 With live data, drop the `--offline` and `--now` flags (and run `scan.py
 universe` first). Nothing is ever sent while `"dry_run": true`. Going live is
@@ -258,7 +293,7 @@ approval on every call.
 python3 -m unittest discover -s tests
 ```
 
-361 tests, offline, on fixtures cut from real NSE data on 2026-10-30.
+370 tests, offline, on fixtures cut from real NSE data on 2026-10-30.
 Per file (upstream in brackets): scanner 44 (36), entry 46 (39), exit 18 (14),
-timemachine 48 (47), budget 37 (31), risk 48 (43), broker 22 (18), alerts 34
-(30), news 21 (17), repo 15 (11), common 28 (new).
+timemachine 48 (47), budget 38 (31), risk 48 (43), broker 27 (18), alerts 35
+(30), news 21 (17), repo 15 (11), common 30 (new).

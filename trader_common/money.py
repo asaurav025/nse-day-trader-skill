@@ -90,7 +90,8 @@ def num(x, decimals=2):
     return inr(x, decimals).replace("₹", "")
 
 
-SNAP = 0.1   # in ticks: a price this close to a tick IS that tick (half a paisa)
+SNAP = 0.1         # in ticks: on_tick's tolerance (half a paisa at the 0.05 tick)
+FLOAT_NOISE = 2e-7  # relative: float32 prices are off by up to about 6e-8 of their value
 
 
 def tick(x, how="nearest", step=None):
@@ -98,13 +99,15 @@ def tick(x, how="nearest", step=None):
     step is the stock's tick (tick_size()); without one, the coarse tick for x itself.
     Yahoo's prices are float32: 1283.60 arrives as 1283.5999755859375 (and the error grows with
     the price), so a value within SNAP of a tick counts as on it before rounding down or up;
-    otherwise 'down' would lose a whole tick."""
+    otherwise 'down' would lose a whole tick. Only float noise snaps (FLOAT_NOISE of the value): a
+    computed price a real fraction of a tick away (a stop 0.08 tick above a grid point) still rounds
+    the way it was asked to."""
     if x is None:
         return None
     step = float(step) if step else tick_size(price=x)
     n = float(x) / step
     k = round(n)
-    if abs(n - k) >= SNAP:
+    if abs(n - k) > FLOAT_NOISE * max(1.0, abs(n)):
         if how == "down":
             k = math.floor(n)
         elif how == "up":

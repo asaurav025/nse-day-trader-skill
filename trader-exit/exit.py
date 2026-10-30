@@ -510,6 +510,9 @@ def resolve_flat_by(day, explicit, cfg, entry_time):
     refused; one after the MIS square-off (about 15:20) gets a note."""
     what = "--flat-by" if explicit else "flat_by"
     t = parse_hhmm(explicit or cfg.get("flat_by") or DEFAULTS["flat_by"], what)
+    if t.minute % 5:
+        raise PlanError("%s %s is not on the 5-minute grid (15:10, 15:05, ...): the plan is replayed on 5-minute "
+                        "bars, which end on it" % (what, hm(t)))
     note = ""
     s = session(day) if day else None
     if s and t >= s[1]:
@@ -731,6 +734,7 @@ def main(argv=None):
     p.add_argument("--now")
     p.add_argument("--json", action="store_true")
     a = ap.parse_args(argv)
+    clock.use_config(getattr(a, "config", None))   # its "holidays" override, wherever it is
     if not a.cmd:
         ap.print_help()
         return 1
