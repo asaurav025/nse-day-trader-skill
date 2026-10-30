@@ -8,12 +8,12 @@ description: >-
   for word, then Claude's own Allow once / Deny card asks again. Builds the
   sell ticket that closes a day trade by your flat-by time, records fills,
   and logs each trade's max loss so trader-risk can hold the daily limit.
-  Covers setting up Alpaca's official MCP server in Claude Desktop (paper by
-  default, keys in env vars, never in chat), the Interactive Brokers
-  connector, and setting order tools to "Needs approval". Use when the user
+  Covers the static-IP setup for Zerodha's kite-mcp-server on the user's VPS
+  (deploy/), the daily Kite login (Step 0), keys only on the VPS and never in
+  chat, and keeping order tools on ask / "Needs approval". Use when the user
   says "place the order", "buy it", "execute", "send it to my broker",
-  "close my position", "flatten", "get me out", "connect Alpaca", "set up
-  paper trading", or after /trader-risk passes.
+  "close my position", "flatten", "get me out", "connect Kite", "log in to
+  Kite", "set up the VPS", or after /trader-risk passes.
 argument-hint: "[order number]"
 ---
 
@@ -55,85 +55,54 @@ is a real yes for that order, builds the flatten ticket, and keeps the log in
 | `trader/portfolio.json` | cash and shares, updated by `fill` and by `result --filled-qty` |
 | `trader/plan.json` | the flat-by time for `flatten` |
 
-## Setup A: Alpaca (official MCP server, Claude Desktop)
+## Setup: Zerodha Kite through your static-IP VPS
 
-Alpaca's own server is github.com/alpacahq/alpaca-mcp-server (MIT). It runs on
-the user's computer inside Claude Desktop. It is not in Claude's connector
-directory. It trades on a **paper** account unless told otherwise. Checked
-against its source on 2026-10-20 (version 2.4.0).
+Since 1 April 2026 Zerodha rejects Kite Connect order requests that do not come from a
+static IP whitelisted on the developer account. Orders therefore go through Zerodha's own
+MCP server (github.com/zerodha/kite-mcp-server, v0.3.2) running on the user's VPS, whose
+Reserved IP is whitelisted, reachable only through Cloudflare Tunnel + Access. The full
+runbook and every file are in `deploy/` at the repo root (`deploy/README.md`); in short:
 
-1. The user makes an Alpaca account and creates **paper trading** API keys in
-   the Alpaca dashboard. Paper keys are separate from live keys.
-2. The user installs `uv` (it provides `uvx`), from docs.astral.sh/uv.
-3. In Claude Desktop: Settings > Developer > Edit Config. That opens
-   `claude_desktop_config.json` (macOS: `~/Library/Application Support/Claude/`,
-   Windows: `%APPDATA%\Claude\`). The user adds this block (also in
-   `claude_desktop_config.example.json` here) and types their own keys into the file:
+1. Vultr VPS in Mumbai with a Reserved IPv4 as its **main** IP, IPv6 off.
+2. Kite Connect app with redirect URL `https://<your hostname>/callback`.
+3. `deploy/bootstrap.sh` on the VPS: ufw with no inbound ports, cloudflared, kite-mcp-server
+   on 127.0.0.1 only. The Kite API key and secret are typed by the user into
+   `/etc/kite-mcp/kite.env` on the VPS, nowhere else.
+4. Cloudflare: Access app (email one-time PIN for the user's browser, a service token for
+   Claude Code), then the tunnel route to `http://127.0.0.1:8080`.
+5. Claude Code connects to `https://<your hostname>/mcp` with the service-token headers from
+   environment variables (`deploy/claude-mcp-config.example.json`), and keeps every order
+   tool on ask in `.claude/settings.json`:
+   `"permissions": {"ask": ["mcp__kite__place_order", "mcp__kite__cancel_order", "mcp__kite__modify_order"]}`.
+   Never put an order tool in `allow`. Claude Desktop (via mcp-remote) is read-only until the
+   user has checked that `place_order` shows an approval card on every call.
+6. Only after `check-egress-ip.sh` passes: whitelist the Reserved IP at developers.kite.trade >
+   Profile > IP Whitelist (one change per calendar week).
 
-```json
-{
-  "mcpServers": {
-    "alpaca": {
-      "command": "uvx",
-      "args": ["alpaca-mcp-server"],
-      "env": {
-        "ALPACA_API_KEY": "paste your paper key here, in this file only",
-        "ALPACA_SECRET_KEY": "paste your paper secret here, in this file only",
-        "ALPACA_PAPER_TRADE": "true",
-        "ALPACA_TOOLSETS": "account,trading,stock-data"
-      }
-    }
-  }
-}
-```
+The server hides `place_gtt_order`, `modify_gtt_order`, `delete_gtt_order` and `modify_order`
+(`EXCLUDED_TOOLS`): this pack never uses them.
 
-   The `env` block hands the keys to the server as environment variables.
-   **Keys never go in the chat.** Never ask for them, never read this file
-   back into the conversation, and if the user pastes a key anyway, tell them
-   to delete that message and make new keys in the Alpaca dashboard.
-   `ALPACA_PAPER_TRADE` is already true by default; writing it makes it
-   visible. `ALPACA_TOOLSETS` is optional and hides the tools they do not need.
-4. Restart Claude Desktop.
-5. **Set the tool permissions.** Customize > Connectors (Settings > Connectors
-   in older versions), open alpaca, and for each tool pick Always allow, Needs
-   approval or Blocked:
-   - `place_stock_order`: **Needs approval**. Never Always allow.
-   - every other tool that places, changes, cancels or closes anything
-     (`cancel_order_by_id`, `replace_order_by_id`, `close_position`,
-     `update_account_config`): Needs approval.
-   - `place_option_order`, `place_crypto_order`, `close_all_positions`,
-     `cancel_all_orders`, `exercise_options_position`,
-     `do_not_exercise_options_position`: **Blocked** unless the user has a
-     reason and says so.
-   - read-only tools (`get_account_info`, `get_all_positions`, `get_open_position`,
-     `get_orders`, `get_clock`, `get_stock_snapshot`, `get_stock_latest_quote`):
-     Always allow is fine.
-6. Check it: ask Claude for the Alpaca account info (read only) and confirm
-   in the Alpaca dashboard that it is the paper account.
+**Keys never go in the chat.** Never ask for the Kite API key or secret, the Cloudflare
+service token or the tunnel token; never read `kite.env`, `.env.deploy` or
+`cf-access.env` into the conversation. If the user pastes one anyway, tell them to delete
+that message and rotate it (Kite: developers.kite.trade; Cloudflare: Zero Trust > Service
+Tokens).
 
-In Claude Code instead of Claude Desktop, keep the order tool on ask in
-`.claude/settings.json`: `"permissions": {"ask": ["mcp__alpaca__place_stock_order"]}`,
-and never put an order tool in `allow`.
+## Step 0, every trading day: log in to Kite
 
-**Bracket orders on Alpaca.** `place_stock_order` takes
-`take_profit_limit_price` and `stop_loss_stop_price` (and an optional
-`stop_loss_limit_price`). When either is there, the server sets
-`order_class` to "bracket" by itself; trader-budget writes it anyway so the
-ticket shows it. A bracket is whole shares only, with `time_in_force` day or
-gtc. After the entry fills, the stop-loss and the take-profit wait at the
-broker as two orders that cancel each other. They are day orders too, so they
-end at the close: one more reason to be flat by then.
+The Kite session expires around 6 AM IST every day, and the server keeps it only in memory.
+Before anything that reads the account or places an order:
 
-## Setup B: Interactive Brokers (connector in Claude's directory)
+1. The user opens `https://<your hostname>/` in their browser and passes the Cloudflare
+   email one-time PIN (so Kite's redirect back to `/callback` is let through).
+2. Call the MCP **`login`** tool. Show its warning and its link. The user opens the link
+   within 5 minutes and logs in on Kite's own page with their password and TOTP.
+   Never type, ask for or relay a password, TOTP or `request_token`.
+3. Call **`get_margins`** (read only) to confirm the session.
 
-Interactive Brokers publishes a verified connector: claude.ai/directory/interactive-brokers
-(connector URL `https://api.ibkr.com/v1/api/mcp`). Add it from Customize >
-Connectors > Browse connectors and sign in to IBKR there, not in the chat.
-Its listing says Claude can draft trade instructions that are sent to the
-user's IBKR account for their review and approval, and that Claude never
-submits orders directly to the market. So with IBKR the final yes happens in
-IBKR as well. Set `"broker": "ibkr"` in `trader/config.json`. Set its tools
-that draft orders to Needs approval too.
+Repeat after a server restart, a VPS reboot, a Claude Code restart, or when a tool answers
+that the user is not logged in. The login is never automated and never done from a
+scheduled task.
 
 ## Steps: the entry
 

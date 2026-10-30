@@ -1,0 +1,20 @@
+# Personal trading state and secrets: never committed
+trader/config.json
+trader/state/
+trader/
+*.env
+.env
+**/api_key*
+**/access_token*
+kite*.json
+!**/*.example.json
+
+__pycache__/
+*.pyc
+.DS_Store
+
+# deploy/: VPS settings and any filled env file (keys, tunnel token, hostname)
+deploy/.env.deploy
+*.env
+# Claude Code project MCP config (holds your hostname)
+.mcp.json
