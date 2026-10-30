@@ -405,8 +405,8 @@ def _n(x):
 
 def rules_from_plan(plan, cfg_flat_by=None):
     """trader/plan.json -> a stop alert, a target alert and a flat-by-close time alert, for the plan's day.
-    Levels are rounded to the NSE tick (0.05). On Zerodha the target alert IS the take-profit:
-    no order rests there."""
+    Levels are put on the plan's tick (its "tick_size"; else the coarse tick for the price). On
+    Zerodha the target alert IS the take-profit: no order rests there."""
     if not isinstance(plan, dict) or not plan.get("symbol"):
         raise AlertError("the plan has no symbol (run trader-exit first)")
     sym = symbol_arg(plan["symbol"])
@@ -416,7 +416,8 @@ def rules_from_plan(plan, cfg_flat_by=None):
         if not isinstance(v, (int, float)) or v <= 0:
             raise AlertError("the plan has no %s (run trader-exit)" % key)
         label = plan.get("%s_label" % key)
-        out.append({"id": "%s-plan-%s" % (sym.lower(), key), "symbol": sym, "type": typ, "price": rupees.tick(v),
+        out.append({"id": "%s-plan-%s" % (sym.lower(), key), "symbol": sym, "type": typ,
+                    "price": rupees.tick(v, "nearest", plan.get("tick_size")),
                     "note": word + (": " + label if label else "")})
     flat = plan.get("flat_by") or cfg_flat_by or clock.hm(clock.FLAT_BY)
     if _hhmm(flat) is None:

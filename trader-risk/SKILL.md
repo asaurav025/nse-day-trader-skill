@@ -9,7 +9,7 @@ description: >-
   no more than your trades per day, and no new entries outside your entry
   window (IST) or when the NSE is closed. It also keeps the basics: blocked
   symbols, order size, position cap, cash buffer, margin, short sales, F&O,
-  whole shares and the ₹0.05 tick, malformed orders, duplicates and a daily
+  whole shares and the stock's NSE tick, malformed orders, duplicates and a daily
   order limit. Getting out is never blocked by a day limit. Prints PASS or
   BLOCK with the reason and records the verdicts so trader-broker only shows
   an order that passed. Use when the user says "check my order", "is this
@@ -61,7 +61,7 @@ batch that is fine order by order but breaks a limit together is caught.
 
 | check | blocks when |
 | --- | --- |
-| format | no symbol, side not buy or sell, a qty that is not whole shares, an `order_type` other than LIMIT (Kite takes no API MARKET or SL-M order without market protection, which kite-mcp-server v0.3.2 cannot send), no limit `price`, a price / `stop` / `stop_limit` / `target` off the ₹0.05 tick, a product other than MIS (or CNC) |
+| format | no symbol, side not buy or sell, a qty that is not whole shares, an `order_type` other than LIMIT (Kite takes no API MARKET or SL-M order without market protection, which kite-mcp-server v0.3.2 cannot send), no limit `price`, a `tick_size` NSE does not use, a price / `stop` / `stop_limit` / `target` off the stock's tick, a product other than MIS (or CNC) |
 | asset | an F&O contract (`NIFTY26OCTFUT`, `...24500CE`): out of scope; anything that is not an NSE equity symbol (`RELIANCE`, `M&M`, `BAJAJ-AUTO`; `.NS` is accepted and dropped) |
 | short | a sell of more than you hold (`allow_short` false) |
 | blocked | (entries) the symbol is on the `blocked` list |
@@ -83,9 +83,11 @@ How the numbers work:
   `_usd` key is refused, with the new name, rather than read as rupees.
   Old keys that no longer mean anything on the NSE (`pdt_guard`, `fractional`,
   `allow_options`) are ignored with a warning.
-- **The tick.** The entry, stop and target are rounded to ₹0.05 before any
-  math; a limit, stop or take-profit price in the order itself that is off the
-  tick is a format BLOCK, because the exchange would reject it.
+- **The tick.** NSE's tick goes by price band (₹0.01 under ₹250, ₹0.05 to ₹1,000, ₹0.10 to ₹5,000, ₹0.50 to ₹10,000, ₹1 to ₹20,000, ₹5 above).
+  Each price in the order (limit, stop, SL limit, target) must be a whole number
+  of the order's `tick_size` (a `tick_sizes` entry in trader/config.json wins;
+  without either, the coarsest tick near the price); off the tick is a format
+  BLOCK, because the exchange would reject it.
 - **The entry it measures from**: the limit price for a limit order. For a
   market order, the HIGHER of the plan's entry and a fresh price from
   `trader/prices.json` (under 15 minutes old). A plan written at 9:40 cannot
@@ -126,27 +128,27 @@ not at the broker, a price too old to use, an ignored config key.
 
 The RELIANCE order from trader-budget at 10:15 AM on Thursday 2026-10-29, on a
 fresh ₹1,00,000 account with the example config (real 2026-10-29 bars; plan
-from trader-exit: entry 1,174.30, opening-range-mid stop 1,163.35, 2R target 1,196.20):
+from trader-exit: entry 1,174.30, opening-range-mid stop 1,163.30, 2R target 1,196.30, tick ₹0.10):
 
 ```
-PASS  #1 buy RELIANCE 49 shares, entry
-          limit 1177.85, SL trigger 1163.35 limit 1157.50, target 1196.20: risk 20.35 a share to the SL limit
-          max loss ₹997.15 (limit ₹1,000), reward:risk 1.27 (min 1)
+PASS  #1 buy RELIANCE 48 shares, entry
+          limit 1177.90, SL trigger 1163.30 limit 1157.40, target 1196.30: risk 20.50 a share to the SL limit
+          max loss ₹984 (limit ₹1,000), reward:risk 1.26 (min 1)
           today before this: 0 of 3 trades, ₹0 of ₹3,000 daily loss
 
-1 passed, 0 blocked at 2026-10-29 10:15 IST. Cash after the passed orders: ₹42,285.35 (dry run: nothing goes to Zerodha).
+1 passed, 0 blocked at 2026-10-29 10:15 IST. Cash after the passed orders: ₹43,460.80 (dry run: nothing goes to Zerodha).
 ```
 
 The risk is measured from the LIMIT (the worst entry fill) to the SL's limit
-(the worst stop fill): 1,177.85 - 1,157.50 = 20.35 a share. One more share and
+(the worst stop fill): 1,177.90 - 1,157.40 = 20.50 a share. One more share and
 it is blocked:
 
 ```
-BLOCK #1 buy RELIANCE 50 shares, entry
-          limit 1177.85, SL trigger 1163.35 limit 1157.50, target 1196.20: risk 20.35 a share to the SL limit
-          max loss ₹1,017.50 (limit ₹1,000), reward:risk 1.27 (min 1)
+BLOCK #1 buy RELIANCE 49 shares, entry
+          limit 1177.90, SL trigger 1163.30 limit 1157.40, target 1196.30: risk 20.50 a share to the SL limit
+          max loss ₹1,004.50 (limit ₹1,000), reward:risk 1.26 (min 1)
           today before this: 0 of 3 trades, ₹0 of ₹3,000 daily loss
-        - loss: 50 shares x 20.35 risk a share = ₹1,017.50 if the SL fills at 1157.50, over your ₹1,000 max loss per trade
+        - loss: 49 shares x 20.50 risk a share = ₹1,004.50 if the SL fills at 1157.40, over your ₹1,000 max loss per trade
 ```
 
 A MARKET order is blocked by format (Kite would reject it without market

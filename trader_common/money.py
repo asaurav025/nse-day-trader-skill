@@ -1,8 +1,62 @@
-"""Rupees and the NSE tick. Standard library only."""
+"""Rupees and the NSE tick. Standard library only.
+
+The NSE tick is not one number. Since NSE's April 2025 revision, a stock's tick
+depends on its price band, and NSE sets it each month from the stock's close on
+the last trading day of the previous month (NSE circular CMTR67133 and its
+revisions; Zerodha bulletin "Revision in tick size for NSE derivatives and cash
+segment from April 15, 2025"):
+
+    below 250           0.01        5,000 to 10,000    0.50
+    250 to 1,000        0.05        10,000 to 20,000   1.00
+    1,000 to 5,000      0.10        above 20,000       5.00
+
+Each tick divides the next one up, so a coarser tick is always valid: a price
+on a 0.10 grid is also on the 0.05 and 0.01 grids. When the month-end close is
+not known, tick_size() takes the coarsest tick within EDGE_MOVE of the price,
+which is valid whichever band the stock was put in. A per-symbol override
+("tick_sizes": {"RELIANCE": 0.10} in trader/config.json) beats both.
+"""
 
 import math
 
-TICK = 0.05   # NSE equity tick size, in rupees
+TICK = 0.05   # the most common NSE equity tick (250 to 1,000); see tick_size() for the real one
+TICK_LADDER = ((250.0, 0.01), (1000.0, 0.05), (5000.0, 0.10), (10000.0, 0.50), (20000.0, 1.00))
+TICK_TOP = 5.00
+TICKS = tuple(t for _, t in TICK_LADDER) + (TICK_TOP,)
+EDGE_MOVE = 0.20   # how far a price may have moved since the month-end close it was banded on
+
+
+def band_tick(price):
+    """The ladder's tick for a price: below 250 -> 0.01, 250 to 1,000 -> 0.05, ..."""
+    p = float(price)
+    if p < 250.0:
+        return 0.01
+    for top, t in TICK_LADDER[1:]:
+        if p <= top:
+            return t
+    return TICK_TOP
+
+
+def tick_size(month_close=None, price=None, override=None):
+    """The tick for one stock: the override, else the band of the previous month-end close,
+    else the coarsest band within EDGE_MOVE of price (always a valid tick)."""
+    if override:
+        t = float(override)
+        if not any(abs(t - x) < 1e-9 for x in TICKS):
+            raise ValueError("tick size %s is not an NSE tick (%s)" % (override, ", ".join("%g" % x for x in TICKS)))
+        return t
+    if month_close:
+        return band_tick(month_close)
+    if price:
+        p = float(price)
+        return max(band_tick(p / (1 + EDGE_MOVE)), band_tick(p), band_tick(p * (1 + EDGE_MOVE)))
+    raise ValueError("a tick size needs a month-end close, a price or an override")
+
+
+def on_tick(x, step):
+    """Is x a whole number of ticks (float noise allowed)?"""
+    n = float(x) / float(step)
+    return abs(n - round(n)) < 1e-6 * max(1.0, abs(n)) or abs(n - round(n)) < SNAP / 10
 
 
 def group_in(n):
@@ -38,14 +92,16 @@ def num(x, decimals=2):
 SNAP = 0.1   # in ticks: a price this close to a tick IS that tick (half a paisa)
 
 
-def tick(x, how="nearest"):
-    """Round a price to the 0.05 tick: 'nearest', 'down' (a stop or a sell) or 'up' (a buy limit).
+def tick(x, how="nearest", step=None):
+    """Round a price to its tick: 'nearest', 'down' (a stop or a sell) or 'up' (a buy limit).
+    step is the stock's tick (tick_size()); without one, the coarse tick for x itself.
     Yahoo's prices are float32: 1283.60 arrives as 1283.5999755859375 (and the error grows with
     the price), so a value within SNAP of a tick counts as on it before rounding down or up;
     otherwise 'down' would lose a whole tick."""
     if x is None:
         return None
-    n = float(x) / TICK
+    step = float(step) if step else tick_size(price=x)
+    n = float(x) / step
     k = round(n)
     if abs(n - k) >= SNAP:
         if how == "down":
@@ -54,4 +110,4 @@ def tick(x, how="nearest"):
             k = math.ceil(n)
         else:
             k = math.floor(n + 0.5)
-    return round(k * TICK, 2) + 0.0
+    return round(k * step, 2) + 0.0

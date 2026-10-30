@@ -35,7 +35,7 @@ python3 "${CLAUDE_SKILL_DIR}/timemachine.py" run --write            # also save 
 python3 "${CLAUDE_SKILL_DIR}/timemachine.py" run --until 14:30      # end each replay earlier than flat_by
 python3 "${CLAUDE_SKILL_DIR}/timemachine.py" run --json
 python3 "${CLAUDE_SKILL_DIR}/timemachine.py" run --symbol RELIANCE --date 2026-10-29 \
-    --entry 1174.30 --stop 1163.35 --target 1185.25 --entry-time "9:40 AM"
+    --entry 1174.30 --stop 1163.30 --target 1185.30 --entry-time "9:40 AM"
 python3 "${CLAUDE_SKILL_DIR}/timemachine.py" chart --from           # ASCII fan chart of the saved run
 ```
 
@@ -76,7 +76,8 @@ optional). Other flags: `--replays N`, `--seed N` (default 19), `--window N`
    gap through the stop still counts as -1R here. A real fill can be worse.
 5. **The history.** The plan's own rule (the same opening range, stop rule
    and target R) runs again on every one of those past sessions, with
-   entries, stops and targets on the 0.05 tick like trader-exit's. That is
+   entries, stops and targets on the NSE tick (the coarse tick for each price,
+   valid in any month's band). That is
    what really happened, not a simulation.
 6. **The verdict** is one line from the numbers. It looks only at the
    replays that hit one side, and asks how often the target came first. A
@@ -123,21 +124,21 @@ grid, an entry too close to flat_by). A live in-progress bar is never used.
 
 RELIANCE, Thursday 2026-10-29 (real NSE bars). The 15-minute opening range is
 1,156.20 to 1,170.50. The 9:35 bar closes above it: entry 1,174.30 at 9:40 AM
-(bar 4), stop 1,163.35 (the range midpoint), target 1,185.25 (1R, risk 10.95
-a share).
+(bar 4), stop 1,163.30 (the range midpoint, down to RELIANCE's ₹0.10 tick),
+target 1,185.30 (1R, risk 11.00 a share).
 
 ```
 10,000 replays of the rest of the day, 9:40 AM to 3:10 PM (66 five-minute bars; flat by 3:10 PM), seed 19.
-  target first   24.1 %
-  stop first     31.4 %
-  neither        44.5 %   still open at 3:10 PM
+  target first   23.9 %
+  stop first     31.1 %
+  neither        45.0 %   still open at 3:10 PM
   green          44.5 %   target first, or above the entry at 3:10 PM
   Price at 3:10 PM: median ₹1,172.57, 90 % of replays between ₹1,156.07 and ₹1,189.23.
-  Average R: -0.096 (R = the ₹10.95 risk: +1R at the target, -1R at the stop).
+  Average R: -0.095 (R = the ₹11.00 risk: +1R at the target, -1R at the stop).
 History: the same rule (15-min opening range, stop at the opening-range midpoint, 1R target) on each of
-those 57 real sessions fired 27 times: 13 target, 11 stop, 3 neither. Average R +0.037.
-Leans toward the stop: target first 24.1 % vs stop first 31.4 %.
-44.5 % of the replays hit neither by 3:10 PM; the price at 3:10 PM decides those.
+those 57 real sessions fired 27 times: 13 target, 11 stop, 3 neither. Average R +0.038.
+Leans toward the stop: target first 23.9 % vs stop first 31.1 %.
+45.0 % of the replays hit neither by 3:10 PM; the price at 3:10 PM decides those.
 ```
 
 At 1R the target has to come first in half of the replays that hit one

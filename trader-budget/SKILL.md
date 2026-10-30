@@ -3,7 +3,7 @@ name: trader-budget
 description: >-
   Budget Manager. Sizes every position to your budget and your max loss per
   trade, in rupees. Reads the trade plan from trader-exit (entry, stop,
-  target), rounds every price to the NSE tick of ₹0.05, finds the whole shares
+  target), rounds every price to the stock's NSE tick, finds the whole shares
   that fit inside four limits (max loss per trade, position cap, max order,
   cash after your buffer), says which limit decided it, and writes ONE
   proposed Zerodha order to trader/orders.json for trader-broker's two-leg
@@ -17,8 +17,8 @@ argument-hint: "[budget in rupees]"
 
 # trader-budget
 
-The Budget Manager turns a plan ("buy RELIANCE at 1,174.30, stop 1,163.35")
-into an exact order ("buy 49 shares, LIMIT 1,177.85, SL 1,163.35 / 1,157.50"),
+The Budget Manager turns a plan ("buy RELIANCE at 1,174.30, stop 1,163.30")
+into an exact order ("buy 48 shares, LIMIT 1,177.90, SL 1,163.30 / 1,157.40"),
 inside rules the user sets once. The
 stop decides the size: the further away the stop, the fewer shares. It writes
 a proposal only. trader-risk checks it and trader-broker asks the user yes or
@@ -75,8 +75,11 @@ python3 "${CLAUDE_SKILL_DIR}/size.py" --write
 ```
 
 Whole shares only: NSE equity has no fractional shares. Every price is
-rounded to the ₹0.05 tick first (NSE rejects anything else), and the math uses
-the rounded prices. The size is the smallest of four limits:
+on the stock's NSE tick (NSE rejects anything else), and the math uses those
+prices. NSE's tick goes by price band (₹0.01 under ₹250, ₹0.05 to ₹1,000, ₹0.10 to ₹5,000, ₹0.50 to ₹10,000, ₹1 to ₹20,000, ₹5 above), set monthly from the
+previous month-end close: trader-budget uses the plan's `tick_size` from
+trader-exit, a `tick_sizes` entry in trader/config.json overrides it, and
+without either it uses the coarsest tick near the price, valid in any band. The size is the smallest of four limits:
 
 | limit | shares |
 | --- | --- |
@@ -106,39 +109,39 @@ stock locked at its circuit limit may not trade at all. Then hand over to `/trad
 ## Example: the reel
 
 RELIANCE on Thursday 2026-10-29 (real bars). Opening-range breakout from
-trader-exit: entry 1,174.30 at 9:40 AM, stop 1,163.35 (the range's midpoint),
-target 1,196.20 (2R). The example config: ₹1,00,000 budget, 10% cash buffer,
+trader-exit: entry 1,174.30 at 9:40 AM, stop 1,163.30 (the range's midpoint),
+target 1,196.30 (2R), tick ₹0.10 (RELIANCE's 2026-09-30 close ₹1,187.00). The example config: ₹1,00,000 budget, 10% cash buffer,
 ₹1,000 max loss, entry buffer 0.3%, SL buffer 0.5%.
 
-- Limit: 1,174.30 + 0.3% = 1,177.82, up to the tick: **1,177.85**.
-- SL: trigger 1,163.35, limit 1,163.35 - 0.5% = 1,157.53, down to the tick: **1,157.50**.
-- Risk 1,177.85 - 1,157.50 = **20.35** a share (14.50 to the trigger). Reward:risk
-  (1,196.20 - 1,177.85) / 14.50 = 1.27.
+- Limit: 1,174.30 + 0.3% = 1,177.82, up to the ₹0.10 tick: **1,177.90**.
+- SL: trigger 1,163.30, limit 1,163.30 - 0.5% = 1,157.48, down to the tick: **1,157.40**.
+- Risk 1,177.90 - 1,157.40 = **20.50** a share (14.60 to the trigger). Reward:risk
+  (1,196.30 - 1,177.90) / 14.60 = 1.26.
 
 | limit | the math | shares |
 | --- | --- | --- |
-| max loss | ₹1,000 / 20.35 | **49 (decides it)** |
-| position cap | 75% of ₹1,00,000 = ₹75,000 / 1,177.85 | 63 |
-| max order | ₹75,000 / 1,177.85 | 63 |
-| cash | ₹1,00,000 minus ₹10,000 = ₹90,000 / 1,177.85 | 76 |
+| max loss | ₹1,000 / 20.50 | **48 (decides it)** |
+| position cap | 75% of ₹1,00,000 = ₹75,000 / 1,177.90 | 63 |
+| max order | ₹75,000 / 1,177.90 | 63 |
+| cash | ₹1,00,000 minus ₹10,000 = ₹90,000 / 1,177.90 | 76 |
 
-49 shares = ₹57,714.65. Max loss ₹997.15 if the SL fills at its limit (₹710.50
+48 shares = ₹56,539.20. Max loss ₹984 if the SL fills at its limit (₹700.80
 at the trigger). It writes one proposed order:
 
 ```
-leg 1  BUY 49 RELIANCE, LIMIT 1177.85, MIS, day
-leg 2  after it fills: SELL those shares, SL trigger 1163.35 limit 1157.50, MIS, day
-target 1196.20: an alert, not an order (when it rings: trader-broker flatten)
+leg 1  BUY 48 RELIANCE, LIMIT 1177.90, MIS, day
+leg 2  after it fills: SELL those shares, SL trigger 1163.30 limit 1157.40, MIS, day
+target 1196.30: an alert, not an order (when it rings: trader-broker flatten)
 ```
 
-with a `why` ("opening-range breakout on RELIANCE: 49 shares, bound by your
-₹1,000 max loss per trade (49 x 20.35 = ₹997.15 if the SL fills at its limit
-1157.50)") and the `plan`. trader-broker turns it into the two-leg ticket; `why`
+with a `why` ("opening-range breakout on RELIANCE: 48 shares, bound by your
+₹1,000 max loss per trade (48 x 20.50 = ₹984 if the SL fills at its limit
+1157.40)") and the `plan`. trader-broker turns it into the two-leg ticket; `why`
 and `plan` are notes for trader-risk and trader-broker and are never sent to
 the broker.
 
 The buffers cost shares: sized at the plan's own prices (entry 1,174.30, stop
-1,163.35, risk 10.95) the position cap would have allowed 63. That is the price
+1,163.30, risk 11.00) the position cap would have allowed 63. That is the price
 of a LIMIT entry that cannot chase and an SL that cannot sell at any price. Set
 `entry_limit_buffer_pct` / `stop_limit_buffer_pct` in trader/config.json to
 change them (0 to 5).

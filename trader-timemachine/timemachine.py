@@ -10,7 +10,7 @@ session in the data.
     python3 timemachine.py run --until 14:30            # stop each replay earlier than flat_by
     python3 timemachine.py run --seed 7 --replays 20000 --json
     python3 timemachine.py run --symbol RELIANCE --date 2026-10-29 --entry 1174.30 \\
-        --stop 1163.35 --target 1196.20 --entry-time "9:40 AM"
+        --stop 1163.30 --target 1196.30 --entry-time "9:40 AM"
     python3 timemachine.py chart                        # ASCII fan chart of the replays
     python3 timemachine.py chart --from trader/timemachine.json
 
@@ -50,7 +50,8 @@ How the replays work (the reel's sim.py, same algorithm, same random draws):
   6. History: the plan's own rule (an opening-range breakout with the same
      opening range, stop rule and target R) re-run on every one of those past
      full sessions, first close beyond the range = entry, same stop-first rule.
-     Its entries, stops and targets are on the 0.05 tick like trader-exit's:
+     Its entries, stops and targets are on the NSE tick (the coarse tick for each
+     price, valid in any month's band; trader_common/money.py):
      the stop rounds away from the entry, the target to the nearest tick.
 
 The verdict line looks at the replays that hit one side (target or stop) and
@@ -407,17 +408,20 @@ def simulate(pool, entry, stop, target, k, last, replays=10000, seed=19, window=
 
 # ---------------------------------------------------------------- stop rules and the history replay
 
-def tick_away(x, long):
-    """Round a stop to the 0.05 tick, away from the entry: down for a buy, up for a sell."""
-    return rupees.tick(x, "down" if long else "up")
+def tick_away(x, long, step=None):
+    """Round a stop to the tick, away from the entry: down for a buy, up for a sell. step: the
+    stock's tick; None = the coarse tick for the price, valid in any band (history replays
+    sessions from other months, whose band can differ)."""
+    return rupees.tick(x, "down" if long else "up", step)
 
 
-def opening_range(D, n):
+def opening_range(D, n, step=None):
     """(high, low) of the first n bars of a session given as {slot: bar} or a list, on the
-    0.05 tick. Yahoo's prices carry float noise (1283.60 comes as 1283.5999755859375), and a
+    tick. Yahoo's prices carry float noise (1283.60 comes as 1283.5999755859375), and a
     stop rounded DOWN from a noisy midpoint would lose a whole tick."""
     rows = [D[i] for i in range(n)]
-    return rupees.tick(max(b["h"] for b in rows)), rupees.tick(min(b["l"] for b in rows))
+    return (rupees.tick(max(b["h"] for b in rows), "nearest", step),
+            rupees.tick(min(b["l"] for b in rows), "nearest", step))
 
 
 def rule_stop(rule, oh, ol, entry, long):
@@ -596,10 +600,11 @@ def resolve_rule(plan, entry_day):
     if rule["stop_rule"] == "auto":
         rule["stop_rule"] = "pct"
         if all(i in entry_day for i in range(n)):
-            oh, ol = opening_range(entry_day, n)
-            if abs(tick_away((oh + ol) / 2, long) - plan["stop"]) < 0.005:
+            step = plan.get("tick_size")
+            oh, ol = opening_range(entry_day, n, step)
+            if abs(tick_away((oh + ol) / 2, long, step) - plan["stop"]) < 0.005:
                 rule["stop_rule"] = "or_mid"
-            elif abs(tick_away(ol if long else oh, long) - plan["stop"]) < 0.005:
+            elif abs(tick_away(ol if long else oh, long, step) - plan["stop"]) < 0.005:
                 rule["stop_rule"] = far
     elif rule["stop_rule"] in ("or_low", "or_high") and rule["stop_rule"] != far:
         rule["stop_rule"] = "pct"

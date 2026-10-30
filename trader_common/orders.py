@@ -4,12 +4,15 @@ Standard library only.
 
 One proposed order in trader/orders.json is one ticket:
 
-  entry  {"symbol": "RELIANCE", "side": "buy", "qty": 63, "order_type": "LIMIT",
-          "price": 1177.85, "product": "MIS", "stop": 1163.35, "stop_limit": 1157.50,
-          "target": 1196.20, "why": "...", "plan": {...}}
-  exit   {"symbol": "RELIANCE", "side": "sell", "qty": 63, "order_type": "LIMIT",
-          "price": 1190.25, "product": "MIS", "cancel_order_id": "<the open SL stop>",
-          "why": "..."}
+  entry  {"symbol": "RELIANCE", "side": "buy", "qty": 48, "order_type": "LIMIT",
+          "price": 1177.90, "product": "MIS", "stop": 1163.30, "stop_limit": 1157.40,
+          "target": 1196.30, "tick_size": 0.10, "why": "...", "plan": {...}}
+  exit   {"symbol": "RELIANCE", "side": "sell", "qty": 48, "order_type": "LIMIT",
+          "price": 1190.40, "product": "MIS", "tick_size": 0.10,
+          "cancel_order_id": "<the open SL stop>", "why": "..."}
+
+Every price is a whole number of the stock's tick_size (trader_common/money.py:
+NSE's price-band ticks), or Kite rejects the order.
 
 It becomes these calls to kite-mcp-server v0.3.2 (argument names and types from its
 mcp/post_tools.go; numbers are JSON numbers):
@@ -31,7 +34,7 @@ max loss is therefore measured at stop_limit, the worst fill that still happens.
 import hashlib
 import json
 
-from trader_common import money
+from trader_common import money, symbols
 
 EXCHANGE = "NSE"
 VARIETY = "regular"
@@ -44,7 +47,7 @@ DEFAULT_BUFFERS = {             # percent; config keys of the same names overrid
     "exit_limit_buffer_pct": 0.5,
 }
 FP_FIELDS = ("symbol", "side", "qty", "order_type", "price", "product", "stop", "stop_limit", "target",
-             "cancel_order_id")
+             "tick_size", "cancel_order_id")
 PRICE_KEYS = ("price", "stop", "stop_limit", "target")
 TAG_PREFIX = "ndt"              # Kite tag: alphanumeric, at most 20 characters
 
@@ -60,14 +63,29 @@ def buffer_pct(cfg, key):
     return v
 
 
-def limit_above(price, pct):
-    """A buy limit pct% above price, up to the tick (1174.30 at 0.3% -> 1177.85)."""
-    return money.tick(float(price) * (1 + pct / 100.0), "up")
+def limit_above(price, pct, step=None):
+    """A buy limit pct% above price, up to the tick (1174.30 at 0.3%, tick 0.10 -> 1177.90)."""
+    return money.tick(float(price) * (1 + pct / 100.0), "up", step)
 
 
-def limit_below(price, pct):
-    """A sell limit pct% under price, down to the tick (1163.35 at 0.5% -> 1157.50)."""
-    return money.tick(float(price) * (1 - pct / 100.0), "down")
+def limit_below(price, pct, step=None):
+    """A sell limit pct% under price, down to the tick (1163.30 at 0.5%, tick 0.10 -> 1157.40)."""
+    return money.tick(float(price) * (1 - pct / 100.0), "down", step)
+
+
+def tick_of(order, cfg=None, plan=None):
+    """The tick for an order's symbol: trader/config.json tick_sizes, else the order's (or the plan's)
+    tick_size, else the coarse tick for its price. Raises ValueError for a tick NSE does not use."""
+    sym = symbols.normalize(order.get("symbol")) or str(order.get("symbol") or "").upper()
+    table = {(symbols.normalize(k) or str(k).upper()): v for k, v in (((cfg or {}).get("tick_sizes")) or {}).items()}
+    over = table.get(sym)
+    if over:
+        return money.tick_size(override=over)
+    for src in (order, plan or {}):
+        if src.get("tick_size"):
+            return money.tick_size(override=src["tick_size"])
+    p = _num(order.get("price")) or _num((plan or {}).get("entry"))
+    return money.tick_size(price=p) if p else money.TICK
 
 
 def _num(v):
@@ -78,11 +96,11 @@ def _num(v):
 
 
 def _canon(k, v):
-    """One canonical form per field, so 63, "63" and 63.0 (or 1177.85 and "1177.850") match."""
+    """One canonical form per field, so 48, "48" and 48.0 (or 1177.9 and "1177.900") match."""
     if k == "qty":
         f = _num(v)
         return int(f) if f is not None and f == int(f) else str(v)
-    if k in PRICE_KEYS:
+    if k in PRICE_KEYS or k == "tick_size":
         f = _num(v)
         return "%.2f" % f if f is not None else str(v)
     if k in ("side",):

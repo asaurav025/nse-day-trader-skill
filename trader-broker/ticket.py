@@ -34,10 +34,10 @@ day trade in two legs (trader_common/orders.py has the shape and the reasons):
     python3 ticket.py show --index 1 --json   # one ticket as JSON
     python3 ticket.py approve --index 1 --reply "yes"
     python3 ticket.py result --index 1 --status placed --broker-id 251029000123456
-    python3 ticket.py stop --index 1 --filled-qty 49 --filled-price 1176.90
+    python3 ticket.py stop --index 1 --filled-qty 48 --filled-price 1176.90
     python3 ticket.py result --index 1 --leg stop --status placed --broker-id 251029000123789
     python3 ticket.py flatten --symbol RELIANCE --last 1196.40
-    python3 ticket.py fill --symbol RELIANCE --side sell --qty 49 --price 1190.45
+    python3 ticket.py fill --symbol RELIANCE --side sell --qty 48 --price 1190.45
     python3 ticket.py log
 
 Dry run ("dry_run": true in trader/config.json, the default; Zerodha has no
@@ -190,7 +190,7 @@ def plain_parts(order):
 
 
 def plain(order):
-    """BUY 49 RELIANCE, LIMIT 1,177.85, MIS, good for today / then, once it fills: ... / max loss about ..."""
+    """BUY 48 RELIANCE, LIMIT 1,177.90, MIS, good for today / then, once it fills: ... / max loss about ..."""
     return " / ".join(plain_parts(order))
 
 
@@ -689,7 +689,7 @@ def cmd_flatten(a):
     if a.qty is not None:
         qty = _f(a.qty)
         if qty is None or qty <= 0 or abs(qty - round(qty)) > 1e-9:
-            raise TicketError("--qty wants the whole number of shares you hold, like --qty 49")
+            raise TicketError("--qty wants the whole number of shares you hold, like --qty 48")
     else:
         pf = read_json(a.portfolio, "portfolio", required=False) or {}
         qty = sum(_f(p.get("shares", p.get("qty"))) or 0 for p in pf.get("positions", [])
@@ -703,9 +703,14 @@ def cmd_flatten(a):
         or cfg.get("flat_by") or clock.hm(clock.FLAT_BY)
     state = load_state(a.state)
     stop = open_stop(state, sym, today)
-    price = kite.limit_below(last, buf)
+    try:
+        step = kite.tick_of({"symbol": sym, "price": last}, cfg,
+                            plan if (nse.normalize(plan.get("symbol")) or "") == sym else None)
+    except ValueError as e:
+        raise TicketError(str(e))
+    price = kite.limit_below(last, buf, step)
     order = {"symbol": sym, "side": "sell", "qty": int(round(qty)), "order_type": "LIMIT", "price": price,
-             "product": "MIS",
+             "product": "MIS", "tick_size": step,
              "why": "flat by %s IST: closes the %s day trade, LIMIT %s%% under the last %s (qty from %s)"
              % (flat_by, sym, rupees.num(buf, 1) if buf != int(buf) else int(buf), _p(last), source)}
     if stop:

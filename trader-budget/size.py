@@ -35,8 +35,9 @@ How many shares. Whole shares only: NSE equity has no fractional shares.
                      (and no more than the cash in trader/portfolio.json, if you have one)
 
 Money is in rupees: every limit key ends in _inr, and a config that still has
-an _usd key is refused. Every price is on the NSE tick of 0.05, and the risk
-math uses those prices. Reward:risk is the plan's: (target - limit) / (limit - stop).
+an _usd key is refused. Every price is on the stock's NSE tick (the plan's
+"tick_size", or a "tick_sizes" entry in trader/config.json, else the coarse tick
+for the price; trader_common/money.py), and the risk math uses those prices. Reward:risk is the plan's: (target - limit) / (limit - stop).
 Zero shares (the stop is too far away for your max loss) is a plain refusal:
 no order is written. So is a reward:risk under min_reward_risk.
 
@@ -279,9 +280,9 @@ def fresh_price(doc, sym, now_utc, minutes=FRESH_MINUTES):
 
 # ---------------------------------------------------------------- money helpers
 
-def round_tick(x):
-    """Round a price to the NSE tick of 0.05 (nearest)."""
-    return rupees.tick(x)
+def round_tick(x, step=None):
+    """Round a price to the stock's tick (nearest); step None = the coarse tick for x."""
+    return rupees.tick(x, "nearest", step)
 
 
 def shares_for(inr, per_share):
@@ -293,8 +294,8 @@ def shares_for(inr, per_share):
 
 
 def _price(x):
-    """1166.2 -> "1166.20": on the tick, as a string (the order JSON's convention)."""
-    return "%.2f" % round_tick(x)
+    """1166.2 -> "1166.20". Display only: prices are put on their tick where they are made."""
+    return "%.2f" % float(x)
 
 
 def _num(x):
@@ -359,25 +360,31 @@ def size_trade(plan, cfg, budget=None, limit=None, price=None, cash=None, today=
     product = str(c.get("product") or "MIS").upper()
     if product != "MIS":
         raise SizeError("a day trade is product MIS (intraday), not %r" % product)
+    try:
+        step = kite.tick_of({"symbol": sym, "price": limit or entry_plan}, c, plan)
+    except ValueError as e:
+        raise SizeError(str(e))
     if limit is not None:
-        base, ref_from = round_tick(limit), "limit"
+        base, ref_from = round_tick(limit, step), "limit"
+        if abs(base - float(limit)) > 1e-6:
+            raise SizeError("--limit %s is not on %s's \u20b9%.2f tick (nearest %.2f)" % (limit, sym, step, base))
         ref = base
     else:
-        if price is not None and round_tick(price) > round_tick(entry_plan):
-            base, ref_from = round_tick(price), "price"
+        if price is not None and round_tick(price, step) > round_tick(entry_plan, step):
+            base, ref_from = round_tick(price, step), "price"
         else:
-            base, ref_from = round_tick(entry_plan), "plan"
-        ref = kite.limit_above(base, entry_buf)
-    stop, target = round_tick(stop), round_tick(target)
+            base, ref_from = round_tick(entry_plan, step), "plan"
+        ref = kite.limit_above(base, entry_buf, step)
+    stop, target = round_tick(stop, step), round_tick(target, step)
     if stop >= ref:
         raise SizeError("the stop %s is not below the entry %s; a long trade needs its stop underneath"
                         % (_price(stop), _price(ref)))
     if target <= ref:
         raise SizeError("the target %s is not above the limit %s: the move has already happened. "
                         "Skip it or make a new plan with trader-exit" % (_price(target), _price(ref)))
-    stop_limit = kite.limit_below(stop, stop_buf)
+    stop_limit = kite.limit_below(stop, stop_buf, step)
     if stop_limit >= stop:
-        stop_limit = round_tick(stop - rupees.TICK)
+        stop_limit = round_tick(stop - step, step)
     risk_c = int(round((ref - stop_limit) * 100))       # what the limits are held to
     risk_stop_c = int(round((ref - stop) * 100))         # the plan's R
     reward_c = int(round((target - ref) * 100))
@@ -433,7 +440,8 @@ def size_trade(plan, cfg, budget=None, limit=None, price=None, cash=None, today=
                    % (qty, "" if qty == 1 else "s", sym, money(cost), money(c["min_order_inr"])))
     return {
         "symbol": sym, "side": "buy", "setup": plan.get("setup", ""), "date": plan.get("date"),
-        "entry_time": plan.get("entry_time", ""), "entry_plan": round_tick(entry_plan),
+        "entry_time": plan.get("entry_time", ""), "entry_plan": round_tick(entry_plan, step), "tick_size": step,
+        "tick_basis": plan.get("tick_basis") if plan.get("tick_size") else None,
         "entry": ref, "entry_base": base, "entry_from": ref_from, "entry_limit_buffer_pct": entry_buf,
         "stop": stop, "stop_limit": stop_limit, "stop_limit_buffer_pct": stop_buf, "target": target,
         "risk_per_share": risk, "risk_per_share_at_stop": risk_stop_c / 100.0,
@@ -461,7 +469,7 @@ def kite_order(s):
     return {
         "symbol": s["symbol"], "side": "buy", "qty": int(s["qty"]), "order_type": "LIMIT",
         "price": s["entry"], "product": s["product"], "stop": s["stop"], "stop_limit": s["stop_limit"],
-        "target": s["target"], "why": why,
+        "target": s["target"], "tick_size": s["tick_size"], "why": why,
         "plan": {"entry": s["entry_plan"], "limit": s["entry"], "stop": s["stop"], "stop_limit": s["stop_limit"],
                  "target": s["target"], "risk_per_share": s["risk_per_share"], "max_loss": s["max_loss"],
                  "max_loss_at_stop": s["max_loss_at_stop"], "setup": s["setup"], "entry_time": s["entry_time"],
@@ -486,6 +494,7 @@ def plan_report(s, order, notes=()):
         lines.append("Limit %s: %s %s plus %s%%, up to the tick (fills like a market order unless the price "
                      "has run away)." % (_price(s["entry"]), src, _price(s["entry_base"]),
                                          _num(s["entry_limit_buffer_pct"])))
+    lines.append("Tick \u20b9%.2f (%s)." % (s["tick_size"], s.get("tick_basis") or "coarse tick for the price"))
     lines.append("SL stop: triggers at %s, sells no lower than %s (%s%% under, down to the tick)."
                  % (_price(s["stop"]), _price(s["stop_limit"]), _num(s["stop_limit_buffer_pct"])))
     lines.append("Risk %s a share (limit %s minus SL limit %s); %s to the trigger. Reward:risk %.2f."
@@ -731,8 +740,9 @@ def orders_from(result, source=""):
         if not p.get("price") or not p.get("shares"):
             continue    # whole shares need a price; a slice without one is reported, not ordered
         out.append({"symbol": p["ticker"], "side": "buy", "qty": int(p["shares"]), "order_type": "LIMIT",
-                    "price": kite.limit_above(p["price"], kite.DEFAULT_BUFFERS["entry_limit_buffer_pct"]),
-                    "product": "CNC", "why": why})
+                    "price": kite.limit_above(p["price"], kite.DEFAULT_BUFFERS["entry_limit_buffer_pct"],
+                                              rupees.tick_size(price=p["price"])),
+                    "product": "CNC", "tick_size": rupees.tick_size(price=p["price"]), "why": why})
     return out
 
 
@@ -826,7 +836,7 @@ def run_plan(a, cfg):
         p, t, fresh = fresh_price(pdoc, sym, now)
         if p is not None and fresh:
             price = p
-            if round_tick(p) > round_tick(_f(plan.get("entry")) or 0):
+            if float(p) > (_f(plan.get("entry")) or 0) + 1e-9:
                 notes.append("%s last %s (as of %s IST) is above the plan's entry %s, so the risk "
                              "is bigger: sized at %s." % (sym, _price(p), to_ist(t).strftime("%H:%M"),
                                                           _price(plan.get("entry")), _price(p)))

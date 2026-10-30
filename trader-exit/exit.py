@@ -11,10 +11,16 @@ It never places an order.
     python3 exit.py show                                    # the current trader/plan.json
 
 Symbols are bare NSE symbols (RELIANCE, M&M, BAJAJ-AUTO; a trailing .NS is accepted).
-Every price the plan produces is on the NSE tick of 0.05 rupee, and the risk, the
-R multiples and reward:risk are worked out from those rounded prices.
+Every price the plan produces is on the stock's NSE tick, and the risk, the R
+multiples and reward:risk are worked out from those rounded prices. The tick
+depends on the price band (0.01 under 250, 0.05 to 1,000, 0.10 to 5,000, 0.50
+to 10,000, 1 to 20,000, 5 above; trader_common/money.py) and NSE sets it from
+the previous month-end close: the plan takes that close from Yahoo's daily bars
+(offline: DIR/<SYMBOL>-1d.json), a "tick_sizes" entry in trader/config.json
+overrides it, and without either it uses the coarsest tick near the entry,
+which is valid in any band. The plan records "tick_size" and "tick_basis".
 
-Stops (a long's stop rounds DOWN to the 0.05 tick, away from the entry):
+Stops (a long's stop rounds DOWN to the tick, away from the entry):
   or-mid     the opening-range midpoint (the default for an orb entry)
   or-low     the opening-range low
   price:X    your price
@@ -24,7 +30,7 @@ Stops (a long's stop rounds DOWN to the 0.05 tick, away from the entry):
              bars by then it averages all of them and says so.
   A level setup has no opening-range default: give a stop.
 
-Targets (round half up to the 0.05 tick):
+Targets (round half up to the tick):
   2R (default), 1R, 1.5R ...   entry + R x risk, where risk = entry - stop
   price:X                      your price
 
@@ -113,7 +119,7 @@ def parse_clock(text, what):
     return datetime.time(h, mi)
 
 
-# ---------------------------------------------------------------- money math (Decimal, on the 0.05 tick)
+# ---------------------------------------------------------------- money math (Decimal, on the stock's tick)
 
 def D(x, what="a number"):
     try:
@@ -124,14 +130,18 @@ def D(x, what="a number"):
         raise PlanError("%s is not a number: %r" % (what, x))
 
 
-def tick(x):
-    """A price: the nearest 0.05 tick (half up)."""
-    return D(rupees.tick(float(D(x)), "nearest")).quantize(CENT)
+def tick(x, step=None):
+    """A price: the nearest tick (half up). step: the stock's tick (see resolve_tick)."""
+    return D(rupees.tick(float(D(x)), "nearest", step)).quantize(CENT)
 
 
-def tick_down(x):
-    """A long's stop: down to the 0.05 tick, away from the entry."""
-    return D(rupees.tick(float(D(x)), "down")).quantize(CENT)
+def tick_down(x, step=None):
+    """A long's stop: down to the tick, away from the entry."""
+    return D(rupees.tick(float(D(x)), "down", step)).quantize(CENT)
+
+
+def tick_words(step):
+    return "\u20b9%s tick" % ("%.2f" % float(step))
 
 
 def money(x):
@@ -198,16 +208,18 @@ def r_label(r):
 
 
 def compute(entry, stop_rule, stop_param, target_rule, target_param, or_high=None, or_low=None,
-            atr=None, atr_bars=None):
-    """The stop, the target and the risk, on the 0.05 tick (exact Decimals). Raises PlanError with the reason."""
-    e = tick(entry)
+            atr=None, atr_bars=None, step=None):
+    """The stop, the target and the risk, on the stock's tick (exact Decimals). Raises PlanError with the reason.
+    step: the tick (resolve_tick); None = the coarse tick for the entry price."""
+    step = step or rupees.tick_size(price=float(D(entry)))
+    e = tick(entry, step)
     if e <= 0:
         raise PlanError("the entry price must be above \u20b90")
     detail = ""
     if stop_rule in ("or_mid", "or_low"):
         if or_high is None or or_low is None:
             raise PlanError("an %s stop needs the opening range (--or-high and --or-low)" % stop_rule.replace("_", "-"))
-        oh, ol = tick(or_high), tick(or_low)
+        oh, ol = tick(or_high, step), tick(or_low, step)
         if oh <= ol:
             raise PlanError("the opening-range high %s must be above its low %s" % (money(oh), money(ol)))
         if stop_rule == "or_mid":
@@ -232,9 +244,10 @@ def compute(entry, stop_rule, stop_param, target_rule, target_param, or_high=Non
             raw_money(a.quantize(Decimal("0.0001"))), atr_bars, " (fewer than 14 so far)" if atr_bars < ATR_BARS else "")
     else:
         raise PlanError("unknown stop rule %r" % stop_rule)
-    stop = tick_down(raw)
+    stop = tick_down(raw, step)
     if stop != D(raw):
-        detail = (detail + ", down to the 0.05 tick" if detail else "%s down to the 0.05 tick" % raw_money(raw))
+        detail = (detail + ", down to the " + tick_words(step) if detail
+                  else "%s down to the %s" % (raw_money(raw), tick_words(step)))
     if stop >= e:
         raise PlanError("the stop %s (%s) is at or above the entry %s: a long's stop goes under the entry"
                         % (money(stop), label, money(e)))
@@ -247,10 +260,10 @@ def compute(entry, stop_rule, stop_param, target_rule, target_param, or_high=Non
                         "survive the spread, normal wiggle would stop you out. Widen it."
                         % (money(risk), money(floor_risk.quantize(CENT, rounding=ROUND_HALF_UP)), money(e)))
     if target_rule == "r":
-        target = tick(e + target_param * risk)
+        target = tick(e + target_param * risk, step)
         t_label = r_label(target_param)
     else:
-        target = tick(target_param)
+        target = tick(target_param, step)
         t_label = None
     if target <= e:
         raise PlanError("the target %s is at or below the entry %s: a long's target goes above it"
@@ -430,12 +443,63 @@ def read_json(path, what):
 
 def read_config(path):
     cfg = dict(DEFAULTS)
+    cfg["tick_sizes"] = {}
     if path and os.path.exists(path):
         doc = read_json(path, "config")
         for k in DEFAULTS:
             if doc.get(k) is not None:
                 cfg[k] = doc[k]
+        if isinstance(doc.get("tick_sizes"), dict):
+            cfg["tick_sizes"] = {(nse.normalize(k) or str(k).upper()): v for k, v in doc["tick_sizes"].items()}
     return cfg
+
+
+def month_end_close(sym, day, offline=None):
+    """(close, date) of sym on the last trading day before day's month, from Yahoo's daily bars:
+    the close NSE bands the month's tick size on. Offline: DIR/<SYM>-1d.json if it is there.
+    (None, None) when it cannot be found."""
+    try:
+        if offline:
+            if not os.path.isdir(offline):
+                return None, None
+            path = None
+            for name in (sym + "-1d.json", sym + "-1d.json.gz", nse.to_yahoo(sym) + "-1d.json"):
+                if os.path.exists(os.path.join(offline, name)):
+                    path = os.path.join(offline, name)
+            if not path:
+                return None, None
+            text = read_text(path)
+        else:
+            text = yahoo_get("/v8/finance/chart/%s?range=3mo&interval=1d" % nse.yahoo_quoted(sym))
+        r = json.loads(text)["chart"]["result"][0]
+        closes = r["indicators"]["quote"][0]["close"]
+    except (PlanError, OSError, ValueError, KeyError, TypeError, IndexError):
+        return None, None
+    first = day.replace(day=1)
+    best = None
+    for t, c in zip(r.get("timestamp") or [], closes):
+        if t is None or c is None:
+            continue
+        d = to_ist(utc_of(t)).date()
+        if d < first and (best is None or d >= best[1]):
+            best = (float(c), d)
+    return best if best else (None, None)
+
+
+def resolve_tick(sym, day, cfg, entry, offline=None):
+    """(tick, basis words). The config override, else NSE's band of the previous month-end close,
+    else the coarse tick for the entry (valid in any band; trader_common/money.py)."""
+    over = (cfg.get("tick_sizes") or {}).get(sym)
+    if over:
+        try:
+            return rupees.tick_size(override=over), "trader/config.json tick_sizes"
+        except ValueError as e:
+            raise PlanError(str(e))
+    close, d = month_end_close(sym, day, offline)
+    if close:
+        return rupees.band_tick(close), "NSE band of the %s close %s on %s" % (sym, money(D(close)), d.isoformat())
+    return (rupees.tick_size(price=float(D(entry))),
+            "no month-end close: the coarsest tick within 20% of the entry (valid whatever the band)")
 
 
 def resolve_flat_by(day, explicit, cfg, entry_time):
@@ -532,12 +596,13 @@ def build_plan(a, now_utc):
             raise PlanError("an atr stop needs at least 3 closed %s bars of %s on %s by the entry; found %d"
                             % (info["interval"], info["symbol"], day, len(bars)))
         atr, atr_n = atr_of(bars)
+    step, tick_basis = resolve_tick(info["symbol"], day, cfg, info["entry"], a.offline)
     c = compute(info["entry"], stop_rule, stop_param, target_rule, target_param, info["or_high"], info["or_low"],
-                atr, atr_n)
+                atr, atr_n, step)
     flat_by, flat_note = resolve_flat_by(day, a.flat_by, cfg, entry_time)
     orr = None
     if info["or_high"] is not None and info["or_low"] is not None:
-        orr = {"high": float(tick(info["or_high"])), "low": float(tick(info["or_low"])),
+        orr = {"high": float(tick(info["or_high"], step)), "low": float(tick(info["or_low"], step)),
                "minutes": int(info["or_minutes"] or 15)}
     plan = {"created_by": "trader-exit", "symbol": info["symbol"], "side": "buy", "date": day.isoformat(),
             "setup": info["setup"], "entry": float(c["entry"]),
@@ -546,7 +611,7 @@ def build_plan(a, now_utc):
             "stop": float(c["stop"]), "stop_rule": stop_rule, "stop_label": c["stop_label"],
             "target": float(c["target"]), "target_r": float(c["target_r"]), "target_label": c["target_label"],
             "risk_per_share": float(c["risk"]), "reward_risk": float(c["reward_risk"]), "flat_by": flat_by,
-            "stop_detail": c["stop_detail"], "created_at": now_utc.strftime("%Y-%m-%dT%H:%M:%SZ"), "note": NOTE}
+            "stop_detail": c["stop_detail"], "tick_size": step, "tick_basis": tick_basis, "created_at": now_utc.strftime("%Y-%m-%dT%H:%M:%SZ"), "note": NOTE}
     if atr is not None:
         plan["atr"] = round(atr, 4)
         plan["atr_bars"] = atr_n

@@ -38,8 +38,8 @@ Zerodha's MIS auto square-off, which starts around 15:20.
 python3 "${CLAUDE_SKILL_DIR}/alerts.py" clock                          # NSE open or closed, next open
 python3 "${CLAUDE_SKILL_DIR}/alerts.py" add --from-plan                # stop, target, flat by close from trader/plan.json
 python3 "${CLAUDE_SKILL_DIR}/alerts.py" add --opening-bell
-python3 "${CLAUDE_SKILL_DIR}/alerts.py" add --symbol RELIANCE --stop 1163.35
-python3 "${CLAUDE_SKILL_DIR}/alerts.py" add --symbol RELIANCE --target 1185.25
+python3 "${CLAUDE_SKILL_DIR}/alerts.py" add --symbol RELIANCE --stop 1163.30
+python3 "${CLAUDE_SKILL_DIR}/alerts.py" add --symbol RELIANCE --target 1185.30
 python3 "${CLAUDE_SKILL_DIR}/alerts.py" add --at 15:10 --label "flat by close"
 python3 "${CLAUDE_SKILL_DIR}/alerts.py" add --symbol M&M --pct 3
 python3 "${CLAUDE_SKILL_DIR}/alerts.py" check                          # exit 0 = something rang
@@ -76,7 +76,7 @@ accepted and dropped. Prices are rupees.
 
 A rule with `"date"` is watched on that IST date only; `--from-plan` rules
 carry the plan's date, so yesterday's stop never rings today. `--from-plan`
-rounds the plan's stop and target to the NSE tick (₹0.05). NSE has no early
+rounds the plan's stop and target to the plan's NSE tick (`tick_size`). NSE has no early
 closes, so a rule with the old `"before_close"` key is refused with a message
 saying to remove it.
 
@@ -131,8 +131,8 @@ list is unknown. Special weekend sessions (Muhurat trading) are not modelled.
 
 RELIANCE on Thursday 2026-10-29 (real Yahoo 5-minute bars): the 15-minute
 opening range is ₹1,156.20 to ₹1,170.50, the 9:35 bar closes above it, entry
-₹1,174.30 at 9:40 AM, stop at the range midpoint ₹1,163.35, target 1R
-₹1,185.25, flat by 15:10. `add --from-plan` writes `reliance-plan-stop`,
+₹1,174.30 at 9:40 AM, stop at the range midpoint ₹1,163.30, target 1R
+₹1,185.30, flat by 15:10. `add --from-plan` writes `reliance-plan-stop`,
 `reliance-plan-target` and `reliance-flat-by` for that day. From 9:40 to 15:10
 the bars stay between ₹1,165.00 and ₹1,182.00, so neither price alert rings.
 At 15:10:

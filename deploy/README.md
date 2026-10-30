@@ -189,8 +189,8 @@ for it. Claude Code must show its approval prompt for each call; deny anything y
 expect.
 
 1. `place_order`: `variety=regular, exchange=NSE, tradingsymbol=<SYMBOL>, transaction_type=BUY,
-   quantity=1, product=MIS, order_type=LIMIT, price=<about 1 % under the last price, a 0.05
-   multiple>`. Expect an order id. An error naming the IP means the whitelist or the egress
+   quantity=1, product=MIS, order_type=LIMIT, price=<about 1 % under the last price, a multiple
+   of the stock's tick: ₹0.01 under ₹250, ₹0.05 to ₹1,000, ₹0.10 to ₹5,000>`. Expect an order id. An error naming the IP means the whitelist or the egress
    IP is wrong (see "If the IP changes").
 2. `get_orders`: the order is OPEN (not REJECTED).
 3. `cancel_order`: `variety=regular, order_id=<id>`. `get_orders` shows CANCELLED.

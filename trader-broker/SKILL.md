@@ -41,10 +41,10 @@ Two yeses from the user, one PASS from the rules. No yes, no order. And while
 python3 "${CLAUDE_SKILL_DIR}/ticket.py" show                     # every ticket, READY or not
 python3 "${CLAUDE_SKILL_DIR}/ticket.py" approve --index 1 --reply "yes"
 python3 "${CLAUDE_SKILL_DIR}/ticket.py" result --index 1 --status placed --broker-id 251029000123456
-python3 "${CLAUDE_SKILL_DIR}/ticket.py" stop --index 1 --filled-qty 49 --filled-price 1176.90
+python3 "${CLAUDE_SKILL_DIR}/ticket.py" stop --index 1 --filled-qty 48 --filled-price 1176.90
 python3 "${CLAUDE_SKILL_DIR}/ticket.py" result --index 1 --leg stop --status placed --broker-id 251029000123789
 python3 "${CLAUDE_SKILL_DIR}/ticket.py" flatten --symbol RELIANCE --last 1196.40
-python3 "${CLAUDE_SKILL_DIR}/ticket.py" fill --symbol RELIANCE --side sell --qty 49 --price 1190.45 --closes 251029000123789
+python3 "${CLAUDE_SKILL_DIR}/ticket.py" fill --symbol RELIANCE --side sell --qty 48 --price 1190.45 --closes 251029000123789
 python3 "${CLAUDE_SKILL_DIR}/ticket.py" log
 ```
 
@@ -173,7 +173,7 @@ scheduled task.
 - trader-alerts watches the stop, the target and the flat-by time
   (`alerts.py add --from-plan`). The SL at Zerodha does the stopping.
 - When the SL fills, record it: `ticket.py fill --symbol RELIANCE --side sell
-  --qty 49 --price 1163.10 --closes <SL order id>`. If the stop alert rang but
+  --qty 48 --price 1163.10 --closes <SL order id>`. If the stop alert rang but
   the SL is still open with the price under its limit, it did NOT fill: tell
   the user the position is unprotected and offer the exit at once.
 - On the target, or by `flat_by` (15:10 IST; Zerodha squares MIS off from
@@ -194,29 +194,29 @@ scheduled task.
 ## Example: the reel (dry run)
 
 RELIANCE, Thursday 2026-10-29, real bars, the example config. trader-budget
-sized it at 49 shares and trader-risk passed it at 10:15:
+sized it at 48 shares (RELIANCE's tick is ₹0.10) and trader-risk passed it at 10:15:
 
 ```
 ORDER 1 of 1, Zerodha (Kite), DRY RUN: nothing is sent
-  BUY 49 RELIANCE, LIMIT 1,177.85, MIS, good for today
-  then, once it fills: SELL those shares with an SL stop, trigger 1,163.35, limit 1,157.50
-  target 1,196.20: an alert, not an order
-  max loss about ₹997.15 if the SL fills at its limit 1,157.50 (₹710.50 at the trigger 1,163.35); a gap below 1,157.50 leaves the SL unfilled
+  BUY 48 RELIANCE, LIMIT 1,177.90, MIS, good for today
+  then, once it fills: SELL those shares with an SL stop, trigger 1,163.30, limit 1,157.40
+  target 1,196.30: an alert, not an order
+  max loss about ₹984.00 if the SL fills at its limit 1,157.40 (₹700.80 at the trigger 1,163.30); a gap below 1,157.40 leaves the SL unfilled
   READY: trader-risk PASS, waiting for your yes
   DRY RUN: do not call. In a live account Claude would call:
     1. place_order with exactly:
        {"variety": "regular", "exchange": "NSE", "tradingsymbol": "RELIANCE", "transaction_type": "BUY",
-        "quantity": 49, "product": "MIS", "order_type": "LIMIT", "price": 1177.85, "validity": "DAY",
-        "tag": "ndt578aff16688f"}
+        "quantity": 48, "product": "MIS", "order_type": "LIMIT", "price": 1177.9, "validity": "DAY",
+        "tag": "ndt20812921dcbb"}
   Leg 2, the SL stop, comes after the entry fills: ticket.py stop --index 1 ...
 ```
 
-"sure" is not recorded; "yes 63" is not recorded (this ticket is 49 shares);
-"yes, 49 RELIANCE" is. In dry run that yes is logged as placed
-(`DRYRUN-entry-...`), and `stop --filled-qty 49 --filled-price 1176.90` prints
-leg 2 (`order_type` SL, `trigger_price` 1163.35, `price` 1157.5, `quantity` 49).
+"sure" is not recorded; "yes 63" is not recorded (this ticket is 48 shares);
+"yes, 48 RELIANCE" is. In dry run that yes is logged as placed
+(`DRYRUN-entry-...`), and `stop --filled-qty 48 --filled-price 1176.90` prints
+leg 2 (`order_type` SL, `trigger_price` 1163.3, `price` 1157.4, `quantity` 48).
 At 11:40 the target alert rings with the last price 1,196.40; `flatten` writes
-"first cancel the open SL stop, order DRYRUN-stop-... / SELL 49 RELIANCE,
+"first cancel the open SL stop, order DRYRUN-stop-... / SELL 48 RELIANCE,
 LIMIT 1,190.40", trader-risk passes it as an exit, and the user's yes logs it.
 Live, each of those calls would have shown Claude's approval prompt first.
 

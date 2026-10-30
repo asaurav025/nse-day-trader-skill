@@ -4,8 +4,8 @@ description: >-
   Exit Planner. Sets your stop and your target before you enter, so you know
   when to get out. Reads the entry from trader-entry (or a price you give),
   puts the stop at the opening-range midpoint by default (or the range low,
-  your price, a percent, or a multiple of the ATR), rounds it down to the NSE
-  tick of 0.05 rupee, and sets the target at 2R (or 1R, or your price). Refuses
+  your price, a percent, or a multiple of the ATR), rounds it down to the
+  stock's NSE tick, and sets the target at 2R (or 1R, or your price). Refuses
   a stop at or above the entry, a target at or below it, or a stop too tight
   to survive the spread, and says why. Writes trader/plan.json for the Time
   Machine, the Budget Manager and Price Alerts. Long side only, NSE cash
@@ -62,7 +62,12 @@ folder of `<SYMBOL>.json`, for an ATR stop).
 
 A level setup has no opening range to lean on, so it needs a stop you name.
 
-- **Rounding.** Every price is on the NSE tick of 0.05 rupee. The stop
+- **Rounding.** Every price is on the stock's NSE tick, which goes by price
+  band (₹0.01 under ₹250, ₹0.05 to ₹1,000, ₹0.10 to ₹5,000, ₹0.50 to ₹10,000, ₹1 to ₹20,000, ₹5 above) and is set monthly from the previous
+  month-end close: the plan takes that close from Yahoo's daily bars (offline:
+  `<SYMBOL>-1d.json` in the folder), a `tick_sizes` entry in trader/config.json
+  overrides it, and without either it uses the coarsest tick near the entry,
+  which is valid in any band. The plan records `tick_size` and `tick_basis`. The stop
   rounds AWAY from the entry (down, for a long). Risk = entry minus stop.
   Target = entry + R x risk, rounded half up to the tick. The risk, R and
   reward:risk are worked out from those rounded prices, so the numbers agree
@@ -103,16 +108,17 @@ at 9:40 AM (bar 4). `exit.py plan --stop or-mid --target 1R --write`:
 ```
 Exit plan: RELIANCE long, Thu 2026-10-29, opening-range breakout on 5-minute bars
   Entry         ₹1,174.30 at 9:40 AM (bar 4)
-  Stop          ₹1,163.35  opening-range midpoint: (₹1,170.50 + ₹1,156.20) / 2 = ₹1,163.35
-  Target        ₹1,185.25  1R (one times the risk)
-  Risk a share  ₹10.95 (0.93% of the entry)
+  Stop          ₹1,163.30  opening-range midpoint: (₹1,170.50 + ₹1,156.20) / 2 = ₹1,163.35, down to the ₹0.10 tick
+  Target        ₹1,185.30  1R (one times the risk)
+  Risk a share  ₹11.00 (0.94% of the entry)
   Reward:risk   1.0
   Flat by       15:10 IST, win or lose: no overnight hold
 ```
 
-The midpoint is already on the tick here. The default 2R target would be
-1,174.30 + 2 x 10.95 = 1,196.20. trader-budget then sizes it: with a ₹500 max
-loss per trade, floor(500 / 10.95) = 45 shares.
+RELIANCE's tick is ₹0.10 (its 2026-09-30 close, ₹1,187.00, is in the ₹1,000 to
+₹5,000 band), so the midpoint 1,163.35 goes down to 1,163.30. The default 2R
+target would be 1,174.30 + 2 x 11.00 = 1,196.30. trader-budget then sizes it
+against its LIMIT and SL prices (48 shares with the example config).
 
 ## Rules
 

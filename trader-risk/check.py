@@ -24,9 +24,12 @@ What blocks an order (every order):
                 (NSE equity has no fractions); order_type other than LIMIT
                 (Kite takes no API MARKET / SL-M order without market
                 protection, which kite-mcp-server v0.3.2 cannot send); no
-                limit price; a price, stop, stop_limit or target off the 0.05
-                tick; product other than MIS (or CNC); a stop_limit without a
-                stop, or not under it
+                limit price; a tick_size NSE does not use; a price, stop,
+                stop_limit or target that is not a whole number of the stock's
+                tick (the order's tick_size, a "tick_sizes" override in the
+                config, else the coarse tick for its price: NSE's ticks go by
+                price band, trader_common/money.py); product other than MIS (or
+                CNC); a stop_limit without a stop, or not under it
   asset         F&O contracts (NIFTY26OCTFUT, ...24500CE / PE): out of scope
                 for this pack; anything that is not an NSE equity symbol
   short         selling more than you hold, unless "allow_short": true
@@ -55,7 +58,7 @@ What blocks an entry (on top):
 
 Money is in rupees: every limit key ends in _inr, and a config that still has
 an _usd key is refused (no silent unit mix-ups). Prices are rounded to the NSE
-tick (0.05) before any risk math.
+tick before any risk math.
 
 Not checked: circuit limits (the stock's daily price band). Yahoo's chart data
 has no price-band fields, so this tool cannot see them; a stop or target beyond
@@ -202,13 +205,13 @@ def money(x):
     return rupees.inr(x, 0 if abs(x - round(x)) < 0.005 else 2)
 
 
-def _tick(x):
-    """A price on the NSE 0.05 tick, nearest (1174.32 -> 1174.30)."""
-    return rupees.tick(x)
+def _tick(x, step=None):
+    """A price on the stock's tick, nearest (1174.32 -> 1174.30 on a 0.10 tick)."""
+    return rupees.tick(x, "nearest", step)
 
 
-def on_tick(x):
-    return abs(float(x) * 20 - round(float(x) * 20)) < 1e-6
+def on_tick(x, step):
+    return rupees.on_tick(x, step)
 
 
 def config_units(cfg):
@@ -356,14 +359,22 @@ def check(orders, cfg, portfolio=None, prices=None, state=None, today=None, now=
                            "market protection, which kite-mcp-server v0.3.2 cannot send" % (o.get("order_type"),))
         if product not in kite.PRODUCTS:
             reasons.append("format: product must be MIS (intraday) or CNC (delivery), got %r" % (o.get("product"),))
+        try:
+            step = kite.tick_of(o, c, plan)
+        except ValueError as e:
+            reasons.append("format: %s" % e)
+            step = None
+        if step and o.get("tick_size") and abs(float(o["tick_size"]) - step) > 1e-9:
+            warns.append("the order says tick %s but trader/config.json tick_sizes says %s for %s: checked on %s"
+                         % (o["tick_size"], step, sym, step))
         for k in kite.PRICE_KEYS:
             if o.get(k) is not None:
                 v = _f(o.get(k))
                 if v is None or v <= 0:
                     reasons.append("format: %s must be a positive price, got %r" % (k, o.get(k)))
-                elif not on_tick(v):
-                    reasons.append("format: %s %s is not a multiple of the \u20b90.05 tick (NSE rejects it; "
-                                   "nearest is %.2f)" % (k, o.get(k), _tick(v)))
+                elif step and not on_tick(v, step):
+                    reasons.append("format: %s %s is not a multiple of %s's \u20b9%.2f tick (NSE rejects it; "
+                                   "nearest is %.2f)" % (k, o.get(k), sym, step, _tick(v, step)))
         if o.get("price") is None:
             reasons.append("format: a LIMIT order needs a price")
         if o.get("stop_limit") is not None and o.get("stop") is None:
@@ -380,10 +391,10 @@ def check(orders, cfg, portfolio=None, prices=None, state=None, today=None, now=
 
         # the reference price: the LIMIT, the worst price this order can fill at
         ref = _f(o.get("price"))
-        ref = _tick(ref) if ref else None
+        ref = _tick(ref, step) if ref else None
         ref_from = "limit" if ref else None
         live = fresh(sym)
-        live = _tick(live) if live else live
+        live = _tick(live, step) if live else live
         if ref and live and side == "buy" and live > ref + CENT:
             warns.append("%s last %s is above your limit %s: the buy will rest unfilled unless it comes back"
                          % (sym, _p(live), _p(ref)))
@@ -444,13 +455,13 @@ def check(orders, cfg, portfolio=None, prices=None, state=None, today=None, now=
         if kind == "entry" and side in ("buy", "sell"):
             long = side == "buy"
             stop = _f(o.get("stop"))
-            stop = _tick(stop) if stop else None
+            stop = _tick(stop, step) if stop else None
             stop_limit = _f(o.get("stop_limit"))
-            stop_limit = _tick(stop_limit) if stop_limit else None
+            stop_limit = _tick(stop_limit, step) if stop_limit else None
             target = _f(o.get("target"))
-            target = _tick(target) if target else None
+            target = _tick(target, step) if target else None
             plan_stop = _f(plan.get("stop"))
-            if stop and plan_stop and abs(_tick(plan_stop) - stop) > CENT:
+            if stop and plan_stop and abs(_tick(plan_stop, step) - stop) > CENT:
                 warns.append("the order's stop %s differs from the plan's stop %s: the order's is the SL "
                              "trigger the broker gets" % (_p(stop), _p(plan_stop)))
             if not stop:
@@ -558,7 +569,7 @@ def check(orders, cfg, portfolio=None, prices=None, state=None, today=None, now=
             "amount": "%s shares" % qty,
             "value_inr": round(value, 2) if value is not None else None,
             "entry_ref": round(ref, 2) if ref else None, "entry_ref_from": ref_from,
-            "stop": stop, "stop_limit": stop_limit, "target": target, "risk_per_share": risk_ps,
+            "stop": stop, "stop_limit": stop_limit, "target": target, "tick_size": step, "risk_per_share": risk_ps,
             "max_loss": max_loss,
             "reward_risk": rr, "fingerprint": fingerprint(o), "verdict": verdict,
             "reasons": reasons, "warnings": warns, "info": info,
