@@ -62,8 +62,9 @@ class Repo(unittest.TestCase):
     def test_root_layout(self):
         root = sorted(d for d in os.listdir(ROOT) if not d.startswith((".git", ".DS")) and d != "trader")
         want = [".claude-plugin", "LICENSE", "README.md", "deploy", "tests", "trader_common"] + SKILLS
-        if os.path.exists(os.path.join(ROOT, "MIGRATION.md")):
-            want.append("MIGRATION.md")
+        for optional in ("MIGRATION.md", "docs"):     # docs/design: proposals, not part of the skills
+            if os.path.exists(os.path.join(ROOT, optional)):
+                want.append(optional)
         self.assertEqual(root, sorted(want))
 
     def test_frontmatter_name_and_description(self):
