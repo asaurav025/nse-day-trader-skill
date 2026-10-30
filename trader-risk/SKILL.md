@@ -175,9 +175,8 @@ treats a PASS as the user's yes.
 - Dry run by default (`"dry_run": true`): Zerodha has no paper account, so trader-broker renders and logs
   every ticket and Claude calls no order tool. Going live is the user's own edit of their own config.
 - Nothing in this pack places an order except trader-broker, and only when all three hold: trader-risk
-  passed that exact order today, the user typed an explicit yes for that one order in the chat, and the
-  user clicked Allow once on Claude's own card because the order tool is set to "Needs approval"
-  (Customize > Connectors > tool permissions). Never set an order tool to "Always allow".
-- No F&O, ever (out of scope). No margin, short selling or leverage unless the config allows it and the
-  user confirms.
-- Broker keys live on the broker's server (see trader-broker), never in the chat.
+  passed that exact order today, the user typed an explicit yes for that one ticket in the chat, and the
+  user allowed each Kite order call once on Claude's own approval prompt (the order tools stay on ask).
+  Never set an order tool to "Always allow", and never place an order from a scheduled task.
+- No F&O, no margin beyond Zerodha's intraday (MIS) product, no short selling.
+- Kite keys live only in the MCP server's environment on the user's VPS (deploy/), never in the chat.
