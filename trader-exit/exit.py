@@ -29,8 +29,8 @@ it, a risk under 0.05% of the price (too tight to survive the spread), an
 entry.json that has not triggered (unless you give --entry), a short (v2
 plans longs only).
 
-flat_by (default 15:55, or "flat_by" in trader/config.json): out by then, win
-or lose. On a 1:00 p.m. early close it moves up with the close (12:55).
+flat_by (default 15:10 IST, or "flat_by" in trader/config.json): out by then,
+win or lose (MIS auto square-off starts about 15:20).
 "min_reward_risk" in the config (default 1.0) only warns here; trader-risk
 enforces it.
 
@@ -50,48 +50,18 @@ import urllib.error
 import urllib.request
 from decimal import Decimal, InvalidOperation, ROUND_FLOOR, ROUND_HALF_UP
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from trader_common import clock  # noqa: E402
+
 UA = "Mozilla/5.0 (compatible; day-trader-skill/2.0; +https://github.com/Jakeschincariol/day-trader-skill)"
 BACKOFF = 5.0
 HOSTS = ("query2", "query1")
 INTERVALS = {"1m": 60, "5m": 300}
-DEFAULTS = {"flat_by": "15:55", "min_reward_risk": 1.0}
+DEFAULTS = {"flat_by": clock.hm(clock.FLAT_BY), "min_reward_risk": 1.0}
 ATR_BARS = 14
 MIN_RISK_PCT = Decimal("0.05")     # risk under 0.05% of the price is inside the spread's noise
 CENT = Decimal("0.01")
-EPOCH = datetime.datetime(1970, 1, 1)
 NOTE = "A stop is a plan, not a guarantee: a gap or a fast market can fill past it."
-
-NYSE_HOLIDAYS = {
-    "2026-01-01": "New Year's Day",
-    "2026-01-19": "Martin Luther King, Jr. Day",
-    "2026-02-16": "Washington's Birthday",
-    "2026-04-03": "Good Friday",
-    "2026-05-25": "Memorial Day",
-    "2026-06-19": "Juneteenth National Independence Day",
-    "2026-07-03": "Independence Day (observed)",
-    "2026-09-07": "Labor Day",
-    "2026-11-26": "Thanksgiving Day",
-    "2026-12-25": "Christmas Day",
-    "2027-01-01": "New Year's Day",
-    "2027-01-18": "Martin Luther King, Jr. Day",
-    "2027-02-15": "Washington's Birthday",
-    "2027-03-26": "Good Friday",
-    "2027-05-31": "Memorial Day",
-    "2027-06-18": "Juneteenth National Independence Day (observed)",
-    "2027-07-05": "Independence Day (observed)",
-    "2027-09-06": "Labor Day",
-    "2027-11-25": "Thanksgiving Day",
-    "2027-12-24": "Christmas Day (observed)",
-}
-NYSE_EARLY_CLOSE = {  # 1:00 p.m. ET
-    "2026-11-27": "day after Thanksgiving",
-    "2026-12-24": "Christmas Eve",
-    "2027-11-26": "day after Thanksgiving",
-}
-OPEN = datetime.time(9, 30)
-CLOSE = datetime.time(16, 0)
-EARLY = datetime.time(13, 0)
-
 
 class PlanError(Exception):
     pass
@@ -99,65 +69,27 @@ class PlanError(Exception):
 
 # ---------------------------------------------------------------- time
 
-def _nth_sunday(year, month, n):
-    d = datetime.date(year, month, 1)
-    d += datetime.timedelta(days=(6 - d.weekday()) % 7)
-    return d + datetime.timedelta(weeks=n - 1)
-
-
-def eastern_offset(utc):
-    """Hours from UTC for New York: -4 in daylight time, -5 otherwise (US rule since 2007)."""
-    y = utc.year
-    start = datetime.datetime.combine(_nth_sunday(y, 3, 2), datetime.time(7, 0))   # 2:00 EST
-    end = datetime.datetime.combine(_nth_sunday(y, 11, 1), datetime.time(6, 0))    # 2:00 EDT
-    naive = utc.replace(tzinfo=None)
-    return -4 if start <= naive < end else -5
-
-
-def to_eastern(utc):
-    return utc.replace(tzinfo=None) + datetime.timedelta(hours=eastern_offset(utc))
-
-
-def eastern_to_utc(local):
-    for off in (-4, -5):
-        utc = local - datetime.timedelta(hours=off)
-        if eastern_offset(utc) == off:
-            return utc
-    return local + datetime.timedelta(hours=5)
-
-
-def utc_now():
-    return datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0, tzinfo=None)
-
-
-def utc_of(ts):
-    return EPOCH + datetime.timedelta(seconds=int(ts))
+to_ist = clock.to_ist
+utc_now = clock.utc_now
+utc_of = clock.utc_of
+hm = clock.hm
+ampm = clock.ampm
+session = clock.session
 
 
 def parse_now(text):
-    """--now -> naive UTC. A time without an offset is New York time."""
-    if not text:
-        return utc_now()
-    t = text.strip()
-    if t.upper().endswith(" ET"):
-        t = t[:-3].strip()
-    if re.match(r"^\d{1,2}:\d{2}$", t):
-        t = "%s %s" % (to_eastern(utc_now()).date().isoformat(), t.zfill(5))
-    t = t.replace("Z", "+00:00")
+    """--now -> naive UTC. A time without an offset is IST."""
     try:
-        dt = datetime.datetime.fromisoformat(t)
-    except ValueError:
-        raise PlanError('--now wants a New York time like "2026-10-19 10:15" (or ...Z for UTC)')
-    if dt.tzinfo is None:
-        return eastern_to_utc(dt)
-    return (dt - dt.utcoffset()).replace(tzinfo=None)
+        return clock.parse_now(text)
+    except clock.ClockError as e:
+        raise PlanError(str(e))
 
 
 def parse_hhmm(text, what):
-    m = re.match(r"^\s*(\d{1,2}):(\d{2})\s*$", str(text))
-    if not m or int(m.group(1)) > 23 or int(m.group(2)) > 59:
-        raise PlanError("%s wants a New York time like 15:55, not %r" % (what, text))
-    return datetime.time(int(m.group(1)), int(m.group(2)))
+    try:
+        return clock.parse_hhmm(text, what)
+    except clock.ClockError as e:
+        raise PlanError(str(e))
 
 
 def parse_clock(text, what):
@@ -173,22 +105,6 @@ def parse_clock(text, what):
     if h > 23 or mi > 59:
         raise PlanError("%s wants a time like 10:15 AM, not %r" % (what, text))
     return datetime.time(h, mi)
-
-
-def hm(t):
-    return "%02d:%02d" % (t.hour, t.minute)
-
-
-def ampm(t):
-    h = t.hour % 12 or 12
-    return "%d:%02d %s" % (h, t.minute, "AM" if t.hour < 12 else "PM")
-
-
-def session(d):
-    """(open_time, close_time) in New York time, or None if closed all day."""
-    if d.weekday() >= 5 or d.isoformat() in NYSE_HOLIDAYS:
-        return None
-    return OPEN, (EARLY if d.isoformat() in NYSE_EARLY_CLOSE else CLOSE)
 
 
 # ---------------------------------------------------------------- money math (Decimal, to the cent)
@@ -405,7 +321,7 @@ def load_chart(sym, interval, day, offline=None):
         except (OSError, ValueError) as e:
             raise PlanError("could not read %s: %s" % (path, e))
     else:
-        back = (to_eastern(utc_now()).date() - day).days
+        back = (to_ist(utc_now()).date() - day).days
         rng = "1d" if back <= 0 else "5d" if back <= 6 else "1mo" if back <= 28 else "60d"
         if interval == "1m" and back > 6:
             raise PlanError("Yahoo keeps 1-minute bars for about a week")
@@ -440,7 +356,7 @@ def load_chart(sym, interval, day, offline=None):
 
 
 def session_bars(chart, day, interval, upto_slot=None, now_utc=None):
-    """Closed, on-grid bars of one New York session, oldest first (the live tick is dropped)."""
+    """Closed, on-grid bars of one IST session, oldest first (the live tick is dropped)."""
     step = INTERVALS[interval]
     s = session(day)
     if not s:
@@ -449,17 +365,17 @@ def session_bars(chart, day, interval, upto_slot=None, now_utc=None):
     close_dt = datetime.datetime.combine(day, s[1])
     if now_utc is None and chart.get("data_time"):
         now_utc = utc_of(chart["data_time"])
-    local = to_eastern(now_utc) if now_utc else None
+    local = to_ist(now_utc) if now_utc else None
     out = {}
     for b in chart["bars"]:
         if b["t"] % step:
             continue
-        et = to_eastern(utc_of(b["t"]))
-        if et.date() != day or not (open_dt <= et < close_dt):
+        ist = to_ist(utc_of(b["t"]))
+        if ist.date() != day or not (open_dt <= ist < close_dt):
             continue
-        if local and et + datetime.timedelta(seconds=step) > local:
+        if local and ist + datetime.timedelta(seconds=step) > local:
             continue
-        slot = int((et - open_dt).total_seconds()) // step
+        slot = int((ist - open_dt).total_seconds()) // step
         if upto_slot is not None and slot > upto_slot:
             continue
         out[slot] = b
@@ -503,21 +419,14 @@ def read_config(path):
 
 
 def resolve_flat_by(day, explicit, cfg, entry_time):
-    """(HH:MM, note). The config's flat-by moves up with a 1:00 p.m. early close."""
-    t = parse_hhmm(explicit or cfg.get("flat_by") or DEFAULTS["flat_by"], "--flat-by" if explicit else "flat_by")
+    """(HH:MM, note). The NSE has no early closes, so the note is always empty; a flat-by
+    at or after the close is refused."""
+    what = "--flat-by" if explicit else "flat_by"
+    t = parse_hhmm(explicit or cfg.get("flat_by") or DEFAULTS["flat_by"], what)
     note = ""
     s = session(day) if day else None
-    if s:
-        close_dt = datetime.datetime.combine(day, s[1])
-        at = datetime.datetime.combine(day, t)
-        if at >= close_dt:
-            if explicit:
-                raise PlanError("--flat-by %s is at or after the %s close on %s" % (hm(t), ampm(s[1]), day))
-            moved = at - (datetime.datetime.combine(day, CLOSE) - close_dt)
-            if moved.time() <= OPEN:
-                raise PlanError("flat_by %s in the config is at or after the close" % hm(t))
-            t = moved.time()
-            note = "moved up for the 1:00 p.m. early close (%s)" % NYSE_EARLY_CLOSE.get(day.isoformat(), "")
+    if s and t >= s[1]:
+        raise PlanError("%s %s is at or after the %s IST close on %s" % (what, hm(t), ampm(s[1]), day))
     if entry_time and entry_time >= t:
         raise PlanError("the entry at %s is at or after your flat-by %s: there is no time left to hold it"
                         % (ampm(entry_time), hm(t)))
@@ -580,7 +489,7 @@ def build_plan(a, now_utc):
         except ValueError:
             raise PlanError("date wants YYYY-MM-DD, not %r" % info["date"])
     else:
-        day = to_eastern(now_utc).date()
+        day = to_ist(now_utc).date()
     entry_time = parse_clock(info["entry_time"], "the entry time") if info["entry_time"] else None
     atr = atr_n = None
     if stop_rule == "atr":
@@ -618,7 +527,7 @@ def build_plan(a, now_utc):
                             % (ratio(c["reward_risk"]), num(D(mrr))))
     except PlanError:
         pass
-    today = to_eastern(now_utc).date()
+    today = to_ist(now_utc).date()
     if day != today:
         warnings.append("This plan is for %s, not today (%s)." % (day.isoformat(), today.isoformat()))
     return plan, warnings
@@ -643,7 +552,7 @@ def describe(plan):
     out.append("  Target        %s  %s" % (money(plan["target"]), plan["target_label"]))
     out.append("  Risk a share  %s (%s%% of the entry)" % (money(plan["risk_per_share"]), pct))
     out.append("  Reward:risk   %s" % ratio(plan["reward_risk"]))
-    out.append("  Flat by       %s ET, win or lose: no overnight hold" % plan["flat_by"])
+    out.append("  Flat by       %s IST, win or lose: no overnight hold" % plan["flat_by"])
     out.append("Set before the entry. If price hits the stop, you are out; never move it further away.")
     out.append(NOTE)
     return out
@@ -685,7 +594,7 @@ def cmd_show(a):
         return 0
     for line in describe(dict({"setup": "orb", "interval": "5m", "stop_label": "", "target_label": ""}, **plan)):
         print(line)
-    today = to_eastern(parse_now(a.now)).date().isoformat()
+    today = to_ist(parse_now(a.now)).date().isoformat()
     if plan["date"] != today:
         print("Note: this plan is for %s, not today (%s)." % (plan["date"], today))
     return 0
@@ -709,10 +618,10 @@ def main(argv=None):
     p.add_argument("--side", default="buy", choices=["buy", "long", "sell", "short"], help="v2: buy only")
     p.add_argument("--stop", help="or-mid (orb default), or-low, price:X, pct:X, atr:K")
     p.add_argument("--target", help="2R (default), 1R, 1.5R, price:X")
-    p.add_argument("--flat-by", help="HH:MM New York (default: config flat_by, 15:55)")
+    p.add_argument("--flat-by", help="HH:MM IST (default: config flat_by, %s)" % DEFAULTS["flat_by"])
     p.add_argument("--config", default="trader/config.json")
     p.add_argument("--offline", metavar="PATH", help="saved Yahoo chart JSON for an atr stop")
-    p.add_argument("--now", help='pretend it is this New York time, e.g. "2026-10-19 10:15"')
+    p.add_argument("--now", help='pretend it is this IST time, e.g. "2026-10-29 10:15"')
     p.add_argument("--write", nargs="?", const="trader/plan.json", metavar="PATH",
                    help="save the plan (default trader/plan.json)")
     p.add_argument("--json", action="store_true")
