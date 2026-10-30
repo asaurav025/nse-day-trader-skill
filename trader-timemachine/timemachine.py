@@ -1,32 +1,44 @@
 #!/usr/bin/env python3
 """Time Machine for trader-timemachine. Standard library only.
 
-Replays a planned day trade before you risk a dollar: 10,000 simulated runs of
+Replays a planned day trade before you risk a rupee: 10,000 simulated runs of
 the rest of the session from your entry, plus the same rule on every past
 session in the data.
 
     python3 timemachine.py run                          # trader/plan.json, 10,000 replays, seed 19
     python3 timemachine.py run --write                  # also save trader/timemachine.json
-    python3 timemachine.py run --until 15:10            # stop each replay at your flat-by time
+    python3 timemachine.py run --until 14:30            # stop each replay earlier than flat_by
     python3 timemachine.py run --seed 7 --replays 20000 --json
-    python3 timemachine.py run --symbol TSLA --date 2026-10-19 --entry 364.18 \\
-        --stop 358.32 --target 370.04 --entry-time "10:15 AM"
+    python3 timemachine.py run --symbol RELIANCE --date 2026-10-29 --entry 1174.30 \\
+        --stop 1163.35 --target 1196.20 --entry-time "9:40 AM"
     python3 timemachine.py chart                        # ASCII fan chart of the replays
     python3 timemachine.py chart --from trader/timemachine.json
 
+Symbols are bare NSE symbols (RELIANCE, M&M, BAJAJ-AUTO; .NS is optional).
+
+The day ends at flat_by, not at the 15:30 close. flat_by is the plan's (from
+trader-exit), else 15:10 IST: intraday (MIS) positions are squared off by
+Zerodha from about 15:20, and Yahoo sends the 15:20 bar of NSE stocks with no
+prices every day (often 15:15 too), so a session is never complete to 15:30.
+A session therefore counts as FULL when every 5-minute bar from 9:15 up to the
+bar that closes at flat_by is there (71 bars for 15:10: 9:15 to 15:05).
+Bars after flat_by are ignored, and --until (default flat_by) cannot be later.
+
 How the replays work (the reel's sim.py, same algorithm, same random draws):
-  1. Fetch 60 days of 5-minute bars (Yahoo v8 chart, range=60d interval=5m;
-     one request). Keep only FULL sessions before the plan's date: 75 bars,
-     9:15 to 3:30 PM IST. Short sessions, gaps and today are left out.
-  2. The pool: for every bar slot 1..74 of the day, each past session's bar as
-     ratios to the previous bar's close: (open, high, low, close) / prev close.
-  3. One replay starts at the entry price and walks the rest of the session.
+  1. Fetch 60 days of 5-minute bars (Yahoo v8 chart, <SYMBOL>.NS, range=60d
+     interval=5m; one request). Keep only FULL sessions before the plan's date
+     (see above). Short sessions, gaps and today are left out.
+  2. The pool: for every bar slot 1..N-1 of the day (N = the full-session bars),
+     each past session's bar as ratios to the previous bar's close:
+     (open, high, low, close) / prev close.
+  3. One replay starts at the entry price and walks the rest of the day.
      For each bar i it picks a slot j = i + randint(-window, window), kept in
-     1..74, then one past bar from pool[j] (random.choice), and scales it to
+     1..N-1, then one past bar from pool[j] (random.choice), and scales it to
      the current price. The stop is checked before the target in every bar,
      so a bar that touches both counts as the stop (the conservative call).
   4. Outcomes: "target" or "stop" (whichever was touched first), or "neither"
-     when the trade is still open at --until (default 15:30, the close).
+     when the trade is still open at --until (default flat_by): it is closed
+     at the close of the bar that ends then.
      "green" = target first, or above the entry at --until (below for a sell).
      R = the target's R at the target, -1 at the stop, otherwise
      (price at --until - entry) / risk. A gap through the stop still counts
@@ -38,6 +50,8 @@ How the replays work (the reel's sim.py, same algorithm, same random draws):
   6. History: the plan's own rule (an opening-range breakout with the same
      opening range, stop rule and target R) re-run on every one of those past
      full sessions, first close beyond the range = entry, same stop-first rule.
+     Its entries, stops and targets are on the 0.05 tick like trader-exit's:
+     the stop rounds away from the entry, the target to the nearest tick.
 
 The verdict line looks at the replays that hit one side (target or stop) and
 compares the target's share of them, target / (target + stop), with the share
@@ -56,9 +70,10 @@ the data. Same plan, same data and same --seed give the same numbers on any
 machine. A simulation built from the stock's own recent bars is not a
 prediction: earnings, news and halts can do what the last 60 days never did.
 
-Data: https://query2.finance.yahoo.com/v8/finance/chart/<T>?range=60d&interval=5m
+Data: https://query2.finance.yahoo.com/v8/finance/chart/<SYMBOL>.NS?range=60d&interval=5m
 (unofficial and free, can lag; falls back to query1 on 429 or 5xx).
---offline FILE reads a saved chart JSON (.json or .json.gz) instead.
+--offline FILE reads a saved chart JSON (.json or .json.gz) instead, or a folder
+holding <SYMBOL>-60d5m.json(.gz).
 Times are IST (UTC+5:30) wall-clock; --now "2026-10-29 10:15" pins the clock.
 """
 
@@ -74,13 +89,12 @@ import statistics
 import sys
 import time
 import urllib.error
-import urllib.parse
 import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from trader_common import clock  # noqa: E402
+from trader_common import clock, money as rupees, symbols as nse  # noqa: E402
 
-UA = "Mozilla/5.0 (compatible; day-trader-skill/2.0; +https://github.com/Jakeschincariol/day-trader-skill)"
+UA = "Mozilla/5.0 (compatible; nse-day-trader-skill/1.0; +https://github.com/asaurav025/nse-day-trader-skill)"
 PAUSE = 0.5          # seconds between requests: be polite to free endpoints
 BACKOFF = 5.0        # seconds to wait once after a 429
 HOSTS = ("query2", "query1")
@@ -88,6 +102,7 @@ INTERVAL = 300       # 5-minute bars, in seconds
 OPEN_MIN = clock.OPEN.hour * 60 + clock.OPEN.minute
 CLOSE_MIN = clock.CLOSE.hour * 60 + clock.CLOSE.minute
 SESSION_BARS = (CLOSE_MIN - OPEN_MIN) // 5   # 75: 9:15 to 15:30 in 5-minute bars
+FLAT_MIN = clock.FLAT_BY.hour * 60 + clock.FLAT_BY.minute   # the default end of the day: 15:10
 MIN_SESSIONS = 20
 SAMPLE_PATHS = 160
 BAND_PATHS = 2000
@@ -146,8 +161,7 @@ def clock24(minutes):
 # ---------------------------------------------------------------- data
 
 def chart_url(sym, host="query2"):
-    return "https://%s.finance.yahoo.com/v8/finance/chart/%s?range=60d&interval=5m" % (
-        host, urllib.parse.quote(sym.upper().replace(".", "-")))
+    return "https://%s.finance.yahoo.com/v8/finance/chart/%s?range=60d&interval=5m" % (host, nse.yahoo_quoted(sym))
 
 
 def _sleep(seconds):
@@ -183,7 +197,7 @@ def fetch_chart(sym):
                 if e.code == 429 or e.code >= 500:
                     break
                 if e.code == 404:
-                    raise TMError("Yahoo has no chart for %s (HTTP 404): check the ticker" % sym.upper())
+                    raise TMError("Yahoo has no chart for %s (HTTP 404): check the NSE symbol" % sym.upper())
                 raise TMError("Yahoo answered HTTP %d for %s" % (e.code, sym.upper()))
             except urllib.error.URLError as e:
                 raise TMError("could not reach Yahoo: %s" % e.reason)
@@ -195,14 +209,17 @@ def fetch_chart(sym):
 
 
 def read_offline(path, sym):
-    """A saved Yahoo chart file (.json or .json.gz), or a folder holding <SYM>-60d5m.json(.gz)."""
+    """A saved Yahoo chart file (.json or .json.gz), or a folder holding <SYMBOL>-60d5m.json(.gz)
+    (or <SYMBOL>.NS-60d5m.json(.gz))."""
     if os.path.isdir(path):
-        for name in ("%s-60d5m.json" % sym.upper(), "%s-60d5m.json.gz" % sym.upper()):
-            if os.path.exists(os.path.join(path, name)):
-                path = os.path.join(path, name)
+        for stem in (sym, nse.to_yahoo(sym)):
+            hit = next((os.path.join(path, stem + ext) for ext in ("-60d5m.json", "-60d5m.json.gz")
+                        if os.path.exists(os.path.join(path, stem + ext))), None)
+            if hit:
+                path = hit
                 break
         else:
-            raise TMError("no %s-60d5m.json(.gz) in %s" % (sym.upper(), path))
+            raise TMError("no %s-60d5m.json(.gz) in %s" % (sym, path))
     if not os.path.exists(path):
         raise TMError("no offline chart file %s" % path)
     opener = gzip.open if path.endswith(".gz") else open
@@ -224,7 +241,7 @@ def chart_result(text, sym):
     res = chart.get("result")
     if not res:
         err = chart.get("error") or {}
-        raise TMError("Yahoo has no data for %s: %s" % (sym.upper(), err.get("description") or "unknown ticker"))
+        raise TMError("Yahoo has no data for %s: %s" % (sym.upper(), err.get("description") or "unknown symbol"))
     return res[0]
 
 
@@ -275,28 +292,30 @@ def split_sessions(bars):
     return days
 
 
-def full_sessions(days, before):
-    """Full sessions (all SESSION_BARS bars) strictly before the plan's date, oldest first,
-    and the short ones that were left out (gaps)."""
+def full_sessions(days, before, nbars=SESSION_BARS):
+    """Full sessions strictly before the plan's date, oldest first: every bar of slots
+    0..nbars-1 (9:15 up to the bar closing at flat_by) is there; later bars are ignored.
+    Also the short ones that were left out (gaps)."""
     full, short = [], []
     for d in sorted(days):
         if d >= before:
             continue
         s = days[d]
-        if len(s) == SESSION_BARS:
-            full.append((d, [s[i] for i in range(SESSION_BARS)]))
+        have = sum(1 for i in range(nbars) if i in s)
+        if have == nbars:
+            full.append((d, [s[i] for i in range(nbars)]))
         else:
-            short.append({"date": d, "bars": len(s)})
+            short.append({"date": d, "bars": have})
     return full, short
 
 
 # ---------------------------------------------------------------- the simulation (sim.py)
 
-def build_pool(sessions):
+def build_pool(sessions, nbars=SESSION_BARS):
     """pool[i] = every past session's bar i as (o, h, l, c) / bar i-1's close, in date order."""
-    pool = [[] for _ in range(SESSION_BARS)]
+    pool = [[] for _ in range(nbars)]
     for _, D in sessions:
-        for i in range(1, SESSION_BARS):
+        for i in range(1, nbars):
             pc = D[i - 1]["c"]
             pool[i].append((D[i]["o"] / pc, D[i]["h"] / pc, D[i]["l"] / pc, D[i]["c"] / pc))
     return pool
@@ -307,13 +326,15 @@ def pct(a, q):
 
 
 def simulate(pool, entry, stop, target, k, last, replays=10000, seed=19, window=2, side="buy"):
-    """Monte Carlo replays of bars k+1..last. Same draws and order as the reel's sim.py."""
+    """Monte Carlo replays of bars k+1..last. Same draws and order as the reel's sim.py.
+    Slots are kept inside the pool (1..len(pool)-1: the day up to flat_by)."""
     long = side == "buy"
     risk = (entry - stop) if long else (stop - entry)
     r_target = round(((target - entry) if long else (entry - target)) / risk, 4)
+    top = len(pool) - 1
 
     def slot(rng, i):
-        return i if window == 0 else min(SESSION_BARS - 1, max(1, i + rng.randint(-window, window)))
+        return i if window == 0 else min(top, max(1, i + rng.randint(-window, window)))
 
     rng = random.Random(seed)
     choice = rng.choice
@@ -386,26 +407,27 @@ def simulate(pool, entry, stop, target, k, last, replays=10000, seed=19, window=
 
 # ---------------------------------------------------------------- stop rules and the history replay
 
-def cents_away(x, long):
-    """Round a stop to the cent, away from the entry: down for a buy, up for a sell."""
-    c = round(x * 100, 4)
-    return (math.floor(c) if long else math.ceil(c)) / 100.0
+def tick_away(x, long):
+    """Round a stop to the 0.05 tick, away from the entry: down for a buy, up for a sell."""
+    return rupees.tick(x, "down" if long else "up")
 
 
 def opening_range(D, n):
-    """(high, low) of the first n bars of a session given as {slot: bar} or a list."""
+    """(high, low) of the first n bars of a session given as {slot: bar} or a list, on the
+    0.05 tick. Yahoo's prices carry float noise (1283.60 comes as 1283.5999755859375), and a
+    stop rounded DOWN from a noisy midpoint would lose a whole tick."""
     rows = [D[i] for i in range(n)]
-    return max(b["h"] for b in rows), min(b["l"] for b in rows)
+    return rupees.tick(max(b["h"] for b in rows)), rupees.tick(min(b["l"] for b in rows))
 
 
 def rule_stop(rule, oh, ol, entry, long):
     r = rule["stop_rule"]
     if r == "or_mid":
-        return cents_away((oh + ol) / 2, long)
+        return tick_away((oh + ol) / 2, long)
     if r in ("or_low", "or_high"):
-        return cents_away(ol if long else oh, long)
+        return tick_away(ol if long else oh, long)
     frac = rule["stop_pct"] / 100.0
-    return cents_away(entry * (1 - frac) if long else entry * (1 + frac), long)
+    return tick_away(entry * (1 - frac) if long else entry * (1 + frac), long)
 
 
 def history_replay(sessions, rule, last, side="buy"):
@@ -420,12 +442,12 @@ def history_replay(sessions, rule, last, side="buy"):
         kk = next((i for i in range(n, last + 1) if (D[i]["c"] > oh if long else D[i]["c"] < ol)), None)
         if kk is None:
             continue
-        e = round(D[kk]["c"], 2)
+        e = rupees.tick(D[kk]["c"])
         s = rule_stop(rule, oh, ol, e, long)
         risk = (e - s) if long else (s - e)
         if risk <= 0:
             continue
-        t = round(e + rule["target_r"] * risk, 2) if long else round(e - rule["target_r"] * risk, 2)
+        t = rupees.tick(e + rule["target_r"] * risk if long else e - rule["target_r"] * risk)
         oc = None
         for b in D[kk + 1:last + 1]:
             if (b["l"] <= s) if long else (b["h"] >= s):
@@ -490,9 +512,10 @@ def load_plan(a, now_utc):
 
 def normalize_plan(raw, src="flags"):
     """A plan dict (trader/plan.json shape) -> the checked plan the time machine runs."""
-    sym = str(raw.get("symbol") or "").strip().upper()
-    if not re.match(r"^[A-Z][A-Z0-9.\-]{0,9}$", sym):
-        raise TMError("the plan needs a ticker symbol, got %r" % raw.get("symbol"))
+    sym = nse.normalize(raw.get("symbol"))
+    if sym is None:
+        raise TMError("the plan needs an NSE symbol (RELIANCE, M&M, BAJAJ-AUTO; .NS is optional), got %r"
+                      % raw.get("symbol"))
     side = str(raw.get("side") or "buy").lower()
     if side not in ("buy", "sell"):
         raise TMError("side must be buy or sell, got %r" % raw.get("side"))
@@ -503,7 +526,7 @@ def normalize_plan(raw, src="flags"):
     try:
         date = datetime.date.fromisoformat(str(raw.get("date") or "")).isoformat()
     except ValueError:
-        raise TMError("the plan needs a date like 2026-10-19, got %r" % raw.get("date"))
+        raise TMError("the plan needs a date like 2026-10-29, got %r" % raw.get("date"))
     entry, stop, target = (_num(raw.get(k), k) for k in ("entry", "stop", "target"))
     long = side == "buy"
     if long and not stop < entry < target:
@@ -514,7 +537,7 @@ def normalize_plan(raw, src="flags"):
     if raw.get("entry_time"):
         close_min = parse_clock(raw["entry_time"], "entry_time")
         if (close_min - OPEN_MIN) % 5:
-            raise TMError("entry_time %s is not on the 5-minute grid (use the bar's close, e.g. 10:15 AM)"
+            raise TMError("entry_time %s is not on the 5-minute grid (use the bar's close, e.g. 9:40 AM)"
                           % raw["entry_time"])
         k = (close_min - OPEN_MIN) // 5 - 1
     if raw.get("entry_bar") is not None:
@@ -527,10 +550,16 @@ def normalize_plan(raw, src="flags"):
                           % (kb, raw["entry_time"], k))
         k = kb
     if k is None:
-        raise TMError("the plan needs entry_time (the entry bar's close, e.g. 10:15 AM) or entry_bar")
-    if not 0 <= k <= SESSION_BARS - 2:
-        raise TMError("the entry must close between 9:35 AM and 3:55 PM to leave bars to replay "
-                      "(got %s)" % clock12(OPEN_MIN + 5 * (k + 1)))
+        raise TMError("the plan needs entry_time (the entry bar's close, e.g. 9:40 AM) or entry_bar")
+    flat = raw.get("flat_by") or clock.hm(clock.FLAT_BY)
+    flat_min = parse_clock(flat, "flat_by")
+    if (flat_min - OPEN_MIN) % 5 or not OPEN_MIN + 10 <= flat_min < CLOSE_MIN:
+        raise TMError("flat_by %s must be on the 5-minute grid, after %s and before the %s close"
+                      % (flat, clock12(OPEN_MIN + 5), clock12(CLOSE_MIN)))
+    if not 0 <= k <= (flat_min - OPEN_MIN) // 5 - 2:
+        raise TMError("the entry must close between %s and %s (before flat_by %s) to leave bars to replay "
+                      "(got %s)" % (clock12(OPEN_MIN + 5), clock12(flat_min - 5), clock24(flat_min),
+                                    clock12(OPEN_MIN + 5 * (k + 1))))
     orng = raw.get("opening_range") or {}
     or_min = orng.get("minutes", 15) if isinstance(orng, dict) else 15
     try:
@@ -547,7 +576,7 @@ def normalize_plan(raw, src="flags"):
         "target_r": round(((target - entry) if long else (entry - target)) / risk, 2),
         "opening_range": dict(orng, minutes=or_min) if isinstance(orng, dict) else {"minutes": or_min},
         "stop_rule": str(raw.get("stop_rule") or "auto"), "interval": "5m",
-        "flat_by": raw.get("flat_by"), "from": src,
+        "flat_by": clock24(flat_min), "from": src,
     }
 
 
@@ -568,9 +597,9 @@ def resolve_rule(plan, entry_day):
         rule["stop_rule"] = "pct"
         if all(i in entry_day for i in range(n)):
             oh, ol = opening_range(entry_day, n)
-            if abs(cents_away((oh + ol) / 2, long) - plan["stop"]) < 0.005:
+            if abs(tick_away((oh + ol) / 2, long) - plan["stop"]) < 0.005:
                 rule["stop_rule"] = "or_mid"
-            elif abs(cents_away(ol if long else oh, long) - plan["stop"]) < 0.005:
+            elif abs(tick_away(ol if long else oh, long) - plan["stop"]) < 0.005:
                 rule["stop_rule"] = far
     elif rule["stop_rule"] in ("or_low", "or_high") and rule["stop_rule"] != far:
         rule["stop_rule"] = "pct"
@@ -584,7 +613,7 @@ def resolve_rule(plan, entry_day):
 # ---------------------------------------------------------------- the run
 
 def _until12(mc):
-    t = mc.get("until") or clock.hm(clock.CLOSE)
+    t = mc.get("until") or clock.hm(clock.FLAT_BY)
     return clock12(int(t[:2]) * 60 + int(t[3:]))
 
 
@@ -645,18 +674,21 @@ def time_machine(text, plan, now_utc, replays=10000, seed=19, window=2, until=No
     sym = plan["symbol"]
     result = chart_result(text, sym)
     meta, bars, dropped = parse_bars(result, now_utc)
-    msym = str(meta.get("symbol") or "").upper()
-    if msym and msym != sym.replace(".", "-"):
-        raise TMError("the data is for %s but the plan is for %s" % (msym, sym))
+    msym = nse.from_yahoo(meta.get("symbol") or "")
+    if msym and msym != sym:
+        raise TMError("the data is for %s but the plan is for %s" % (meta.get("symbol"), sym))
     gran = meta.get("dataGranularity")
     if gran and gran != "5m":
         raise TMError("the data has %s bars; the time machine needs 5-minute bars" % gran)
     if not bars:
         raise TMError("no complete 5-minute bars for %s in the data" % sym)
     k = plan["entry_bar"]
-    until_min = CLOSE_MIN if until is None else parse_clock(until, "--until")
-    if (until_min - OPEN_MIN) % 5 or until_min > CLOSE_MIN:
-        raise TMError("--until must be on the 5-minute grid and no later than %s" % clock12(CLOSE_MIN))
+    flat_min = parse_clock(plan.get("flat_by") or clock.hm(clock.FLAT_BY), "flat_by")
+    nbars = (flat_min - OPEN_MIN) // 5          # the day ends with the bar that closes at flat_by
+    until_min = flat_min if until is None else parse_clock(until, "--until")
+    if (until_min - OPEN_MIN) % 5 or until_min > flat_min:
+        raise TMError("--until must be on the 5-minute grid and no later than flat_by %s: the day trade is "
+                      "closed by then (MIS square-off starts about 3:20 PM)" % clock12(flat_min))
     last = (until_min - OPEN_MIN) // 5 - 1
     if last <= k:
         raise TMError("--until %s leaves nothing to replay after the %s entry" % (clock12(until_min),
@@ -671,15 +703,17 @@ def time_machine(text, plan, now_utc, replays=10000, seed=19, window=2, until=No
     eb = entry_day[k]
     warn = []
     if not eb["l"] - 0.01 <= plan["entry"] <= eb["h"] + 0.01:
-        warn.append("the plan's entry %.2f is outside that bar's range %.2f to %.2f"
-                    % (plan["entry"], eb["l"], eb["h"]))
-    sessions, short = full_sessions(days, plan["date"])
+        warn.append("the plan's entry %s is outside that bar's range %s to %s"
+                    % (rupees.inr(plan["entry"]), rupees.inr(eb["l"]), rupees.inr(eb["h"])))
+    sessions, short = full_sessions(days, plan["date"], nbars)
     if len(sessions) < MIN_SESSIONS:
-        raise TMError("only %d full session(s) of %s before %s in the data; the time machine needs at least %d"
-                      % (len(sessions), sym, plan["date"], MIN_SESSIONS))
-    pool = build_pool(sessions)
+        raise TMError("only %d full session(s) of %s before %s in the data (every bar from %s to flat_by %s); "
+                      "the time machine needs at least %d"
+                      % (len(sessions), sym, plan["date"], clock12(OPEN_MIN), clock12(flat_min), MIN_SESSIONS))
+    pool = build_pool(sessions, nbars)
     mc = simulate(pool, plan["entry"], plan["stop"], plan["target"], k, last, replays, seed, window, plan["side"])
-    mc = dict(mc, until=clock24(until_min), pool_sessions=len(sessions), pool_from=sessions[0][0],
+    mc = dict(mc, until=clock24(until_min), flat_by=clock24(flat_min), full_bars=nbars,
+              pool_sessions=len(sessions), pool_from=sessions[0][0],
               pool_to=sessions[-1][0],
               band_times=[clock24(OPEN_MIN + 5 * (j + 1)) for j in range(k, last + 1)])
     rule = resolve_rule(plan, entry_day)
@@ -696,7 +730,7 @@ def time_machine(text, plan, now_utc, replays=10000, seed=19, window=2, until=No
         "created_by": "trader-timemachine",
         "created_at": now_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "source": source,
-        "data": {"symbol": msym or sym, "interval": "5m", "range": "60d",
+        "data": {"symbol": msym or sym, "yahoo_symbol": nse.to_yahoo(sym), "interval": "5m", "range": "60d",
                  "last_bar": "%s %s IST" % (last_bar["date"], last_bar["start"]),
                  "dropped": dropped, "short_sessions_left_out": short},
         "plan": plan_out,
@@ -716,6 +750,11 @@ def pc(x):
     return "%.1f %%" % (100.0 * x)
 
 
+def R(x):
+    """A price in rupees, Indian grouping."""
+    return rupees.inr(x)
+
+
 def report(doc):
     p, m, h = doc["plan"], doc["mc"], doc["history"]
     long = p["side"] == "buy"
@@ -723,11 +762,12 @@ def report(doc):
     wd = WEEKDAYS[datetime.date.fromisoformat(p["date"]).weekday()]
     r = p["target_r"]
     lines = [
-        "%s %s, %s %s: entry %.2f at %s (bar %d), stop %.2f, target %.2f (%sR, risk %.2f a share)."
-        % (p["symbol"], p["side"], wd, p["date"], p["entry"], p["entry_time"], p["entry_bar"], p["stop"],
-           p["target"], ("%g" % r), p["risk_per_share"]),
-        "%s replays of the rest of the session, %s to %s (%d five-minute bars), seed %d."
-        % ("{:,}".format(m["replays"]), p["entry_time"], until, m["bars_left"], m["seed"]),
+        "%s %s, %s %s: entry %s at %s (bar %d), stop %s, target %s (%sR, risk %s a share)."
+        % (p["symbol"], p["side"], wd, p["date"], R(p["entry"]), p["entry_time"], p["entry_bar"], R(p["stop"]),
+           R(p["target"]), ("%g" % r), R(p["risk_per_share"])),
+        "%s replays of the rest of the day, %s to %s (%d five-minute bars; flat by %s), seed %d."
+        % ("{:,}".format(m["replays"]), p["entry_time"], until, m["bars_left"],
+           _until12({"until": m.get("flat_by")}), m["seed"]),
         "Each bar is drawn whole from %s's own 5-min bars at the same time of day (+-%d bars) over its last "
         "%d full sessions (%s to %s)." % (p["symbol"], m["window"], m["pool_sessions"], m["pool_from"], m["pool_to"]),
         "",
@@ -737,10 +777,10 @@ def report(doc):
         "  green          %-8s target first, or %s the entry at %s" % (pc(m["p_green"]),
                                                                        "above" if long else "below", until),
         "",
-        "  Price at %s: median %.2f, 90 %% of replays between %.2f and %.2f."
-        % (until, m["median_close"], m["p5_close"], m["p95_close"]),
-        "  Average R: %+.3f (R = the %.2f risk: %sR at the target, -1R at the stop)."
-        % (m["avg_R"], p["risk_per_share"], ("+%g" % m["r_at_target"]), ),
+        "  Price at %s: median %s, 90 %% of replays between %s and %s."
+        % (until, R(m["median_close"]), R(m["p5_close"]), R(m["p95_close"])),
+        "  Average R: %+.3f (R = the %s risk: %sR at the target, -1R at the stop)."
+        % (m["avg_R"], R(p["risk_per_share"]), ("+%g" % m["r_at_target"]), ),
         "",
     ]
     if h.get("rule"):
@@ -872,20 +912,21 @@ def main(argv=None):
 
     def common(p):
         p.add_argument("--plan", default="trader/plan.json", help="the plan from trader-exit")
-        p.add_argument("--symbol", help="or give the plan as flags: ticker")
+        p.add_argument("--symbol", help="or give the plan as flags: NSE symbol (RELIANCE, M&M; .NS optional)")
         p.add_argument("--side", default="buy", choices=["buy", "sell"])
         p.add_argument("--date", help="the plan's day, YYYY-MM-DD (default today, IST)")
         p.add_argument("--entry", type=float)
         p.add_argument("--stop", type=float)
         p.add_argument("--target", type=float)
-        p.add_argument("--entry-time", help='the entry bar\'s close, e.g. "10:15 AM"')
+        p.add_argument("--entry-time", help='the entry bar\'s close, e.g. "9:40 AM"')
         p.add_argument("--setup", default="orb")
         p.add_argument("--or-minutes", type=int, default=15)
         p.add_argument("--stop-rule", default="auto", choices=["auto", "or_mid", "or_low", "or_high", "pct"])
         p.add_argument("--replays", type=int, default=10000)
         p.add_argument("--seed", type=int, default=19)
         p.add_argument("--window", type=int, default=2, help="draw from the same time of day +- this many bars")
-        p.add_argument("--until", help="end each replay at this time (default %s, the close)" % clock.hm(clock.CLOSE))
+        p.add_argument("--until", help="end each replay at this time (default: the plan's flat_by, else %s); "
+                       "never later than flat_by" % clock.hm(clock.FLAT_BY))
         p.add_argument("--offline", metavar="FILE", help="a saved Yahoo chart JSON (.json or .json.gz), no network")
         p.add_argument("--now", help='pretend it is this time ("2026-10-29 10:15" IST, or ISO with Z)')
 

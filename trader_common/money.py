@@ -35,15 +35,23 @@ def num(x, decimals=2):
     return inr(x, decimals).replace("₹", "")
 
 
+SNAP = 0.1   # in ticks: a price this close to a tick IS that tick (half a paisa)
+
+
 def tick(x, how="nearest"):
-    """Round a price to the 0.05 tick: 'nearest', 'down' (a stop or a sell) or 'up' (a buy limit)."""
+    """Round a price to the 0.05 tick: 'nearest', 'down' (a stop or a sell) or 'up' (a buy limit).
+    Yahoo's prices are float32: 1283.60 arrives as 1283.5999755859375 (and the error grows with
+    the price), so a value within SNAP of a tick counts as on it before rounding down or up;
+    otherwise 'down' would lose a whole tick."""
     if x is None:
         return None
     n = float(x) / TICK
-    if how == "down":
-        k = math.floor(n + 1e-9)
-    elif how == "up":
-        k = math.ceil(n - 1e-9)
-    else:
-        k = math.floor(n + 0.5 + 1e-9)
+    k = round(n)
+    if abs(n - k) >= SNAP:
+        if how == "down":
+            k = math.floor(n)
+        elif how == "up":
+            k = math.ceil(n)
+        else:
+            k = math.floor(n + 0.5)
     return round(k * TICK, 2) + 0.0

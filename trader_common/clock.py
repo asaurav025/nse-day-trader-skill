@@ -26,6 +26,7 @@ EPOCH = datetime.datetime(1970, 1, 1)
 OPEN = datetime.time(9, 15)
 CLOSE = datetime.time(15, 30)
 FLAT_BY = datetime.time(15, 10)            # MIS auto square-off starts about 15:20
+MIS_SQUARE_OFF = datetime.time(15, 20)     # Zerodha starts squaring off MIS positions about then
 NO_ENTRIES_BEFORE = datetime.time(9, 30)   # the 15-minute opening range is set at 09:30
 NO_ENTRIES_AFTER = datetime.time(14, 45)
 TZ_LABEL = "IST"

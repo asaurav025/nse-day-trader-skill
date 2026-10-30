@@ -2,22 +2,27 @@
 """Price alerts and the NSE clock for trader-alerts. Standard library only.
 
     python3 alerts.py clock                          # is the NSE open? next open / close
-    python3 alerts.py quote TSLA --write             # quotes -> trader/prices.json
-    python3 alerts.py quote --holdings --write       # every ticker in your portfolio and plan
+    python3 alerts.py quote RELIANCE --write         # quotes -> trader/prices.json
+    python3 alerts.py quote --holdings --write       # every symbol in your portfolio and plan
     python3 alerts.py add --from-plan                # stop, target and flat-by-close from trader/plan.json
-    python3 alerts.py add --symbol TSLA --stop 358.32
-    python3 alerts.py add --symbol TSLA --target 370.04
+    python3 alerts.py add --symbol RELIANCE --stop 1166.20
+    python3 alerts.py add --symbol RELIANCE --target 1190.50
     python3 alerts.py add --at 15:10 --label "flat by close"
-    python3 alerts.py add --symbol KO --pct 3
+    python3 alerts.py add --symbol M&M --pct 3
     python3 alerts.py add --opening-bell
     python3 alerts.py check                          # rings what hit, once; exit 1 if nothing rang
     python3 alerts.py check --now "2026-10-29 15:10" --offline tests/fixtures/trader-alerts
     python3 alerts.py list
-    python3 alerts.py reset tsla-plan-stop
+    python3 alerts.py reset reliance-plan-stop
+
+Symbols are bare NSE trading symbols (RELIANCE, M&M, BAJAJ-AUTO); a trailing
+.NS is accepted and dropped. Prices are in rupees.
 
 Rule types:
-  above / target  the price is at or above "price"
-  below / stop    the price is at or below "price"
+  above / target  the price is at or above "price". On Zerodha the take-profit is
+                  this alert, not a resting order: when it rings, you sell.
+  below / stop    the price is at or below "price" (the SL-M stop at the broker
+                  is what actually stops you out; this alert tells you it is near)
   pct_move        the price moved "pct" percent or more from the previous close
                   (or from "ref" if you give one); "direction": "up" or "down"
   opening_bell    the NSE opened today (rings once per trading day)
@@ -30,12 +35,11 @@ quiet until you reset it, unless the rule has "rearm": true (it re-arms when
 the price crosses back). A pct_move alert rings at most once per day.
 
 Quotes (free, delayed, unofficial; for alerts only, never for timing an order):
-  yahoo   https://query2.finance.yahoo.com/v8/finance/chart/TSLA (falls back to
-          query1 on a 429 or a 5xx; one retry with a pause on a 429; one
-          request per ticker, half a second apart; the default)
-  stooq   https://stooq.com/q/l/?s=tsla.us&f=sd2t2ohlcv&h&e=csv (Stooq's free
-          CSV; it answered 404 on 2026-10-13, kept for when it is back)
-  --offline DIR reads DIR/<source>-<TICKER>.json|csv (or .json.gz) instead.
+  Yahoo   https://query2.finance.yahoo.com/v8/finance/chart/RELIANCE.NS (falls
+          back to query1 on a 429 or a 5xx; one retry with a pause on a 429; one
+          request per symbol, half a second apart). It is the only source: when
+          Yahoo does not answer, the check says so and rings nothing for that symbol.
+  --offline DIR reads DIR/yahoo-<SYMBOL>.json (or .json.gz) instead.
 
 NSE calendar: session 09:15 to 15:30 IST, the 2026 trading holidays from
 trader_common/clock.py (NSE's published list) plus any "holidays" override in
@@ -43,10 +47,8 @@ trader/config.json. Outside 2026 the clock says the holiday list is unknown.
 """
 
 import argparse
-import csv
 import datetime
 import gzip
-import io
 import json
 import os
 import re
@@ -56,9 +58,9 @@ import urllib.error
 import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from trader_common import clock  # noqa: E402
+from trader_common import clock, money as rupees, symbols as nse  # noqa: E402
 
-UA = "Mozilla/5.0 (compatible; day-trader-skill/2.0; +https://github.com/Jakeschincariol/day-trader-skill)"
+UA = "Mozilla/5.0 (compatible; nse-day-trader-skill/1.0; +https://github.com/asaurav025/nse-day-trader-skill)"
 PAUSE = 0.5    # seconds between requests: be polite to free endpoints
 BACKOFF = 2.0  # seconds to wait before the one retry after a 429
 YAHOO_HOSTS = ("query2.finance.yahoo.com", "query1.finance.yahoo.com")
@@ -69,6 +71,19 @@ CALENDAR_YEARS = clock.CALENDAR_YEARS
 
 class AlertError(Exception):
     pass
+
+
+def R(x):
+    """A price in rupees, Indian grouping: \u20b91,174.30."""
+    return rupees.inr(x)
+
+
+def symbol_arg(text):
+    """User or file text -> the bare NSE symbol (RELIANCE.NS -> RELIANCE), or an AlertError."""
+    sym = nse.normalize(text)
+    if sym is None:
+        raise AlertError("%r is not an NSE symbol (RELIANCE, M&M, BAJAJ-AUTO; .NS is optional)" % (text,))
+    return sym
 
 
 # ---------------------------------------------------------------- time
@@ -116,33 +131,8 @@ def market_status(now_utc):
 
 # ---------------------------------------------------------------- quotes
 
-def stooq_url(sym):
-    return "https://stooq.com/q/l/?s=%s.us&f=sd2t2ohlcv&h&e=csv" % sym.lower().replace(".", "-")
-
-
 def yahoo_url(sym, host=YAHOO_HOSTS[0]):
-    return "https://%s/v8/finance/chart/%s?range=1d&interval=1d" % (host, sym.upper().replace(".", "-"))
-
-
-def parse_stooq(text, sym):
-    """Symbol,Date,Time,Open,High,Low,Close,Volume -> quote. N/D means no data."""
-    rows = list(csv.DictReader(io.StringIO(text.strip())))
-    if not rows:
-        raise AlertError("Stooq returned no rows for %s" % sym)
-    r = {k.strip().lower(): (v or "").strip() for k, v in rows[0].items() if k}
-    close = r.get("close", "")
-    if not close or close.upper() == "N/D":
-        raise AlertError("Stooq has no data for %s (check the ticker)" % sym)
-
-    def f(k):
-        v = r.get(k, "")
-        try:
-            return float(v)
-        except ValueError:
-            return None
-    return {"symbol": sym.upper(), "price": float(close), "open": f("open"), "high": f("high"),
-            "low": f("low"), "prev_close": None, "time": ("%s %s" % (r.get("date", ""), r.get("time", ""))).strip(),
-            "source": "stooq"}
+    return "https://%s/v8/finance/chart/%s?range=1d&interval=1d" % (host, nse.yahoo_quoted(sym))
 
 
 def parse_yahoo(text, sym):
@@ -163,7 +153,10 @@ def parse_yahoo(text, sym):
             if t else "")
     q = (res[0].get("indicators", {}).get("quote") or [{}])[0]
     opens = [x for x in (q.get("open") or []) if x is not None]
-    return {"symbol": sym.upper(), "price": float(price), "open": opens[0] if opens else None,
+    got = nse.from_yahoo(m.get("symbol") or nse.to_yahoo(sym))
+    if got != sym:
+        raise AlertError("Yahoo answered for %s, not %s" % (got, sym))
+    return {"symbol": sym, "price": float(price), "open": opens[0] if opens else None,
             "high": m.get("regularMarketDayHigh"), "low": m.get("regularMarketDayLow"),
             "prev_close": m.get("previousClose") or m.get("chartPreviousClose"), "time": when,
             "currency": m.get("currency"), "source": "yahoo"}
@@ -194,13 +187,6 @@ def _get(url, timeout=20):
         raise AlertError("could not reach %s: %s" % (url.split("/")[2], e.reason))
 
 
-def fetch(url, timeout=20):
-    code, text = _get(url, timeout)
-    if code != 200:
-        raise AlertError("%s answered HTTP %d" % (url.split("?")[0], code))
-    return text
-
-
 def fetch_yahoo(sym, timeout=20):
     """query2 first. A 429 waits BACKOFF seconds and tries once more; a 429 or a 5xx
     after that moves on to query1. A 404 comes back as Yahoo's own error JSON."""
@@ -218,40 +204,41 @@ def fetch_yahoo(sym, timeout=20):
         last = (url, code)
         if code != 429 and code < 500:
             break
-    raise AlertError("%s answered HTTP %d" % (last[0].split("?")[0], last[1]))
+    raise AlertError("Yahoo answered HTTP %d for %s (no other price source)" % (last[1], sym))
 
 
-def _offline_text(folder, source, sym):
-    ext = "csv" if source == "stooq" else "json"
-    base = os.path.join(folder, "%s-%s.%s" % (source, sym, ext))
-    if os.path.exists(base):
-        with open(base, encoding="utf-8") as fh:
-            return fh.read()
-    if os.path.exists(base + ".gz"):
-        with gzip.open(base + ".gz", "rt", encoding="utf-8") as fh:
-            return fh.read()
-    raise AlertError("no offline quote file %s" % base)
+def _offline_text(folder, sym):
+    """DIR/yahoo-<SYMBOL>.json (or Yahoo's form yahoo-<SYMBOL>.NS.json), plain or .gz."""
+    for name in ("yahoo-%s.json" % sym, "yahoo-%s.json" % nse.to_yahoo(sym)):
+        base = os.path.join(folder, name)
+        if os.path.exists(base):
+            with open(base, encoding="utf-8") as fh:
+                return fh.read()
+        if os.path.exists(base + ".gz"):
+            with gzip.open(base + ".gz", "rt", encoding="utf-8") as fh:
+                return fh.read()
+    raise AlertError("no offline quote file %s" % os.path.join(folder, "yahoo-%s.json" % sym))
 
 
-def get_quotes(symbols, source="yahoo", offline=None, pause=PAUSE):
-    """{SYM: quote} and [errors]. One request per ticker, with a pause between."""
+def get_quotes(symbols, offline=None, pause=PAUSE):
+    """{SYM: quote} and [errors]. One Yahoo request per symbol, with a pause between."""
     quotes, errors = {}, []
-    for i, sym in enumerate(symbols):
-        sym = sym.upper()
+    for i, raw in enumerate(symbols):
         try:
+            sym = symbol_arg(raw)
             if offline:
-                text = _offline_text(offline, source, sym)
+                text = _offline_text(offline, sym)
             else:
                 if i and pause:
                     _sleep(pause)
-                text = fetch(stooq_url(sym)) if source == "stooq" else fetch_yahoo(sym)
-            quotes[sym] = parse_stooq(text, sym) if source == "stooq" else parse_yahoo(text, sym)
+                text = fetch_yahoo(sym)
+            quotes[sym] = parse_yahoo(text, sym)
         except AlertError as e:
             errors.append(str(e))
     return quotes, errors
 
 
-def write_prices(path, quotes, now_utc, source):
+def write_prices(path, quotes, now_utc, source="yahoo"):
     old = {}
     if os.path.exists(path):
         try:
@@ -266,7 +253,7 @@ def write_prices(path, quotes, now_utc, source):
         prices[s] = q["price"]
         detail[s] = {"prev_close": q.get("prev_close"), "time": q.get("time"), "source": q.get("source"),
                      "fetched": stamp}
-    doc = {"as_of": stamp, "source": source,
+    doc = {"as_of": stamp, "source": source, "currency": "INR",
            "note": ("Delayed quotes for alerts and sizing checks. Your broker's price is the one that fills. "
                     "detail.fetched is when each price was read."),
            "prices": prices, "detail": detail}
@@ -309,11 +296,15 @@ def _hhmm(text):
 
 
 def validate(rule):
+    if "before_close" in rule:
+        raise AlertError("rule %s: NSE has no early closes; remove before_close" % rule.get("id"))
     t = rule.get("type")
     if t not in PRICE_TYPES:
         raise AlertError("rule %s: unknown type %r" % (rule.get("id"), t))
     if t not in NO_QUOTE and not rule.get("symbol"):
         raise AlertError("rule %s needs a symbol" % rule.get("id"))
+    if rule.get("symbol") and nse.normalize(rule["symbol"]) is None:
+        raise AlertError("rule %s: %r is not an NSE symbol" % (rule.get("id"), rule["symbol"]))
     if t in ("above", "below", "stop", "target") and not isinstance(rule.get("price"), (int, float)):
         raise AlertError("rule %s needs a numeric price" % rule.get("id"))
     if t == "pct_move" and not isinstance(rule.get("pct"), (int, float)):
@@ -368,14 +359,14 @@ def evaluate(rules, quotes, status, state, now_utc):
                                                                  local.strftime("%H:%M"), at.strftime("%H:%M"))
                 msg += (", the market closes at %s." % status["closes"]) if status["open"] else \
                     ", the market has closed."
-                sym = str(r.get("symbol") or "").upper()
+                sym = nse.normalize(r.get("symbol")) or ""
                 if sym:
                     msg += (" If %s is still open, close it: trader-broker flatten --symbol %s builds the sell "
                             "ticket, then trader-risk and your yes." % (sym, sym))
                 rings.append({"id": rid, "symbol": sym, "message": msg})
                 rung[rid] = stamp
             continue
-        sym = r["symbol"].upper()
+        sym = nse.normalize(r["symbol"])
         q = quotes.get(sym)
         if not q:
             continue
@@ -385,8 +376,8 @@ def evaluate(rules, quotes, status, state, now_utc):
             if hit and rid not in rung:
                 word = "at or above" if typ == "above" else "at or below"
                 label = {"stop": "stop", "target": "target"}.get(r["type"], "alert level")
-                rings.append({"id": rid, "symbol": sym, "message": "%s %s $%.2f: %s your %s $%s%s."
-                              % (sym, "is" if status["open"] else "last", p, word, label, _n(r["price"]),
+                rings.append({"id": rid, "symbol": sym, "message": "%s %s %s: %s your %s %s%s."
+                              % (sym, "is" if status["open"] else "last", R(p), word, label, R(r["price"]),
                                  (" (" + r["note"] + ")") if r.get("note") else "")})
                 rung[rid] = stamp
             elif not hit and rid in rung and r.get("rearm"):
@@ -399,8 +390,8 @@ def evaluate(rules, quotes, status, state, now_utc):
             want = r.get("direction")
             hit = abs(move) >= r["pct"] and (not want or (want == "up") == (move > 0))
             if hit and not _rang_today(rung.get(rid), today):
-                rings.append({"id": rid, "symbol": sym, "message": "%s moved %+.2f%% to $%.2f (from $%.2f)."
-                              % (sym, move, p, float(ref))})
+                rings.append({"id": rid, "symbol": sym, "message": "%s moved %+.2f%% to %s (from %s)."
+                              % (sym, move, R(p), R(float(ref)))})
                 rung[rid] = stamp
     state["last_check"] = stamp
     return rings, state
@@ -412,17 +403,19 @@ def _n(x):
 
 
 def rules_from_plan(plan, cfg_flat_by=None):
-    """trader/plan.json -> a stop alert, a target alert and a flat-by-close time alert, for the plan's day."""
+    """trader/plan.json -> a stop alert, a target alert and a flat-by-close time alert, for the plan's day.
+    Levels are rounded to the NSE tick (0.05). On Zerodha the target alert IS the take-profit:
+    no order rests there."""
     if not isinstance(plan, dict) or not plan.get("symbol"):
         raise AlertError("the plan has no symbol (run trader-exit first)")
-    sym = str(plan["symbol"]).upper()
+    sym = symbol_arg(plan["symbol"])
     out = []
     for key, typ, word in (("stop", "stop", "plan stop"), ("target", "target", "plan target")):
         v = plan.get(key)
         if not isinstance(v, (int, float)) or v <= 0:
             raise AlertError("the plan has no %s (run trader-exit)" % key)
         label = plan.get("%s_label" % key)
-        out.append({"id": "%s-plan-%s" % (sym.lower(), key), "symbol": sym, "type": typ, "price": float(v),
+        out.append({"id": "%s-plan-%s" % (sym.lower(), key), "symbol": sym, "type": typ, "price": rupees.tick(v),
                     "note": word + (": " + label if label else "")})
     flat = plan.get("flat_by") or cfg_flat_by or clock.hm(clock.FLAT_BY)
     if _hhmm(flat) is None:
@@ -441,10 +434,10 @@ def holdings(a):
     syms = []
     pf = _read(a.portfolio, {})
     for p in pf.get("positions", []) if isinstance(pf, dict) else []:
-        syms.append(str(p.get("ticker") or p.get("symbol") or "").upper())
+        syms.append(nse.normalize(p.get("ticker") or p.get("symbol")))
     plan = _read(a.plan, {})
     if isinstance(plan, dict) and plan.get("symbol"):
-        syms.append(str(plan["symbol"]).upper())
+        syms.append(nse.normalize(plan["symbol"]))
     return [s for s in syms if s]
 
 
@@ -474,13 +467,13 @@ def cmd_clock(a):
 
 
 def cmd_quote(a):
-    syms = _dedupe([s.upper() for s in a.symbols] + (holdings(a) if a.holdings else []))
+    syms = _dedupe([symbol_arg(s) for s in a.symbols] + (holdings(a) if a.holdings else []))
     if not syms:
-        raise AlertError("which tickers? alerts.py quote TSLA KO, or --holdings")
+        raise AlertError("which symbols? alerts.py quote RELIANCE M&M, or --holdings")
     now = parse_now(a.now)
-    quotes, errors = get_quotes(syms, a.source, a.offline)
+    quotes, errors = get_quotes(syms, a.offline)
     if a.write and quotes:
-        write_prices(a.write, quotes, now, a.source)
+        write_prices(a.write, quotes, now)
     if a.json:
         print(json.dumps({"quotes": quotes, "errors": errors}, indent=2))
     else:
@@ -489,8 +482,8 @@ def cmd_quote(a):
             if q:
                 chg = ""
                 if q.get("prev_close"):
-                    chg = " (%+.2f%% vs prev close $%.2f)" % (100.0 * (q["price"] / q["prev_close"] - 1), q["prev_close"])
-                print("%-6s $%.2f%s  %s  [%s]" % (s, q["price"], chg, q.get("time", ""), q["source"]))
+                    chg = " (%+.2f%% vs prev close %s)" % (100.0 * (q["price"] / q["prev_close"] - 1), R(q["prev_close"]))
+                print("%-10s %s%s  %s  [%s]" % (s, R(q["price"]), chg, q.get("time", ""), q["source"]))
         for e in errors:
             print("error: " + e)
         if a.write and quotes:
@@ -507,14 +500,16 @@ def cmd_check(a):
     now = parse_now(a.now)
     status = market_status(now)
     watched = [r for r in rules if active(r, status["date"])]
-    syms = _dedupe([str(r.get("symbol", "")).upper() for r in watched if r.get("type") not in NO_QUOTE])
-    quotes, errors = (get_quotes(syms, a.source, a.offline) if syms else ({}, []))
+    for r in rules:
+        validate(r)
+    syms = _dedupe([nse.normalize(r.get("symbol")) for r in watched if r.get("type") not in NO_QUOTE])
+    quotes, errors = (get_quotes(syms, a.offline) if syms else ({}, []))
     state = _read(a.state, {})
     rings, state = evaluate(rules, quotes, status, state, now)
     if not a.no_write:
         _write(a.state, state)
         if quotes:
-            write_prices(a.prices_out, quotes, now, a.source)
+            write_prices(a.prices_out, quotes, now)
     if a.json:
         print(json.dumps({"market": status, "rings": rings, "errors": errors,
                           "quotes": {s: q["price"] for s, q in quotes.items()}}, indent=2))
@@ -525,14 +520,15 @@ def cmd_check(a):
             print("ALERT " + r["message"])
         if not rings:
             print("Nothing hit. %d rule(s) watched today%s." % (
-                len(watched), (", " + ", ".join("%s $%.2f" % (s, quotes[s]["price"]) for s in syms if s in quotes))
+                len(watched), (", " + ", ".join("%s %s" % (s, R(quotes[s]["price"])) for s in syms if s in quotes))
                 if quotes else ""))
         for e in errors:
             print("error: " + e)
         if rings:
-            print("An alert is information, not an order. A bracket's stop-loss and take-profit already sit at "
-                  "the broker: check get_open_position and record any fill (ticket.py fill). To close a "
-                  "position yourself: ticket.py flatten, then trader-risk and your yes.")
+            print("An alert is information, not an order. On Zerodha only the SL-M stop rests at the broker; "
+                  "the target is this alert. Check get_positions / get_orders and record any fill (ticket.py "
+                  "fill). To sell at the target or by flat-by: ticket.py flatten (it cancels the open SL-M, then "
+                  "a MARKET sell), then trader-risk and your yes.")
     return 0 if rings else 1
 
 
@@ -556,7 +552,8 @@ def cmd_add(a):
         for r in new:
             print("Added %s: %s" % (r["id"], json.dumps(r)))
         print("Run alerts.py check every few minutes while the trade is open (a scheduled task or /loop). "
-              "Free quotes are delayed; the broker's bracket orders are what actually stop you out.")
+              "Free quotes are delayed. The SL-M stop at Zerodha is what actually stops you out; the target "
+              "rests nowhere, so when it rings you sell (flatten, trader-risk, your yes).")
         return 0
     if a.opening_bell:
         rule = {"id": a.id or "opening-bell", "type": "opening_bell"}
@@ -566,11 +563,11 @@ def cmd_add(a):
         rule = {"id": a.id or ("time-%s" % a.at.replace(":", "")), "type": "time", "at": a.at,
                 "label": a.label or "time alert"}
         if a.symbol:
-            rule["symbol"] = a.symbol.upper()
+            rule["symbol"] = symbol_arg(a.symbol)
     else:
         if not a.symbol:
             raise AlertError("--symbol is required (or --from-plan, --at, --opening-bell)")
-        sym = a.symbol.upper()
+        sym = symbol_arg(a.symbol)
         if a.above is not None:
             rule = {"type": "above", "price": a.above}
         elif a.below is not None:
@@ -632,8 +629,7 @@ def main(argv=None):
     sub = ap.add_subparsers(dest="cmd")
 
     def net(p):
-        p.add_argument("--source", default="yahoo", choices=["yahoo", "stooq"])
-        p.add_argument("--offline", metavar="DIR", help="read <source>-<TICKER>.json|csv files, no network")
+        p.add_argument("--offline", metavar="DIR", help="read yahoo-<SYMBOL>.json files, no network")
         p.add_argument("--now", help="pretend it is this time (no offset = IST)")
         p.add_argument("--json", action="store_true")
 
@@ -643,7 +639,7 @@ def main(argv=None):
     p = sub.add_parser("quote", help="latest delayed quotes")
     net(p)
     p.add_argument("symbols", nargs="*")
-    p.add_argument("--holdings", action="store_true", help="add tickers from your portfolio and plan")
+    p.add_argument("--holdings", action="store_true", help="add symbols from your portfolio and plan")
     p.add_argument("--portfolio", default="trader/portfolio.json")
     p.add_argument("--plan", default="trader/plan.json")
     p.add_argument("--write", nargs="?", const="trader/prices.json", metavar="PATH",
